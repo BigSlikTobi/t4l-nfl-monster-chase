@@ -26,15 +26,22 @@ struct LibraryView: View {
         if sort == "Spieler" { cards.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending } }
         else if sort == "Wert" {
             cards.sort { left, right in
-                let a = left.hasDisplayableAnalysis ? left.analysis?.marketSummary : nil
-                let b = right.hasDisplayableAnalysis ? right.analysis?.marketSummary : nil
+                let a = displayedPrice(left)
+                let b = displayedPrice(right)
                 // Prices in different currencies cannot be compared without an exchange rate.
-                if a?.primary.currency != b?.primary.currency { return (a?.primary.currency ?? "~") < (b?.primary.currency ?? "~") }
-                if a?.orderingValueCents != b?.orderingValueCents { return (a?.orderingValueCents ?? -1) > (b?.orderingValueCents ?? -1) }
+                if a?.currency != b?.currency { return (a?.currency ?? "~") < (b?.currency ?? "~") }
+                if a?.cents != b?.cents { return (a?.cents ?? -1) > (b?.cents ?? -1) }
                 return left.createdAt > right.createdAt
             }
         } else { cards.sort { $0.createdAt > $1.createdAt } }
         return cards
+    }
+    private func displayedPrice(_ card: OwnedCard) -> (currency: String, cents: Double)? {
+        if let price = card.personalPrice, price.isValid { return (price.currency, Double(price.amountCents)) }
+        if card.hasDisplayableAnalysis, let summary = card.analysis?.valuationSummary {
+            return (summary.primary.currency, summary.orderingValueCents)
+        }
+        return store.unpricedBaseDisplayValue(for: card).map { ($0.currency, Double($0.lowCents)) }
     }
     private var collections: [CardCollection] {
         store.library.collections.sorted { $0.year == $1.year ? $0.name < $1.name : $0.year > $1.year }
@@ -320,9 +327,15 @@ struct OwnedTile: View {
                 Text(trDisplay([a.cardNumber.map { "#" + $0 }, a.parallel ?? a.subset, a.rookie == true ? "RC" : nil].compactMap { $0 }.joined(separator: " · ")))
                     .font(.caption).foregroundStyle(Color.scoutMuted).lineLimit(2)
             }
-            if card.hasCurrentAnalysis, let summary = card.analysis?.marketSummary {
+            if let price = card.personalPrice, price.isValid {
+                Text(CollectionCardValue.money(price.amountCents, currency: price.currency)).font(.subheadline.weight(.bold)).foregroundStyle(Color.scoutAccent)
+                Text(tr("Dein Preis")).font(.caption2).foregroundStyle(Color.scoutMuted)
+            } else if card.hasCurrentAnalysis, let summary = card.analysis?.valuationSummary {
                 Text(trDisplay(summary.valueLabel)).font(.subheadline.weight(.bold)).foregroundStyle(Color.scoutAccent)
                 Text(trDisplay(summary.basisLabel)).font(.caption2).foregroundStyle(Color.scoutMuted).lineLimit(2)
+            } else if let value = store.unpricedBaseDisplayValue(for: card) {
+                Text(trDisplay(value.label)).font(.subheadline.weight(.bold)).foregroundStyle(Color.scoutAccent)
+                Text(trDisplay(value.basis)).font(.caption2).foregroundStyle(Color.scoutMuted).lineLimit(2)
             }
             if needsAttention { Text(trDisplay(collectorStatus(card))).font(.caption2).foregroundStyle(Color.scoutMuted).lineLimit(2) }
         }
@@ -379,7 +392,7 @@ struct CollectionView: View {
                                     if let card = ownedCards.first {
                                         NavigationLink { CardDetailView(cardID: card.id) } label: {
                                             LocalCardPhoto(name: card.frontFile) { image, _ in
-                                                ChecklistTile(entry: entry, image: image, copies: ownedCards.count, market: card.hasCurrentAnalysis ? card.analysis?.marketSummary : nil)
+                                                ChecklistTile(entry: entry, image: image, copies: ownedCards.count, market: card.hasCurrentAnalysis ? card.analysis?.valuationSummary : nil)
                                             }
                                         }.buttonStyle(.plain)
                                     } else {
@@ -511,6 +524,7 @@ private struct CollectedCardDetailView: View {
     @State private var retaking = false
     @State private var photoExpanded = false
     @State private var editingMetadata = false
+    @State private var editingPrice = false
     var body: some View {
         if let card = store.library.cards.first(where: { $0.id == cardID }) {
             ScrollViewReader { proxy in
@@ -520,6 +534,21 @@ private struct CollectedCardDetailView: View {
                         Button { store.toggleCollectible(card.id) } label: {
                             Label(trDisplay(card.isCollectible == true ? "In deinen Collectibles" : "Zu Collectibles hinzufügen"), systemImage: card.isCollectible == true ? "trophy.fill" : "trophy")
                                 .frame(maxWidth: .infinity)
+                        }.buttonStyle(ScoutSecondaryButtonStyle())
+                        if card.personalPrice?.isValid != true, let value = store.unpricedBaseDisplayValue(for: card) {
+                            LabeledContent(trDisplay(value.basis)) { Text(trDisplay(value.label)).bold() }
+                        }
+                        Button { editingPrice = true } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(tr("Dein Preis")).font(.caption).foregroundStyle(Color.scoutMuted)
+                                    if let price = card.personalPrice, price.isValid {
+                                        Text(CollectionCardValue.money(price.amountCents, currency: price.currency)).font(.title2.bold())
+                                    } else { Text(tr("Preis hinzufügen")).font(.headline) }
+                                }
+                                Spacer()
+                                Image(systemName: "pencil")
+                            }.frame(maxWidth: .infinity)
                         }.buttonStyle(ScoutSecondaryButtonStyle())
                         if card.hasDisplayableAnalysis, let analysis = card.analysis {
                             if !card.hasCurrentAnalysis { statusPanel(card, previous: true) }
@@ -539,6 +568,7 @@ private struct CollectedCardDetailView: View {
                                     }.buttonStyle(ScoutSecondaryButtonStyle())
                                 }
                             }
+                            CardVariantPicker(card: card)
                             AnalysisCardsView(analysis: analysis, provisional: card.hasProvisionalAnalysis == true, pricingPaused: card.state == "failed" || !store.connected, assessmentCleared: card.manualAssignment == true && analysis.insights == nil) { section in
                                 withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) { proxy.scrollTo(section, anchor: .top) }
                             }
@@ -561,6 +591,7 @@ private struct CollectedCardDetailView: View {
                 .sheet(isPresented: $correcting) { CorrectCardView(cardID: card.id) }
                 .sheet(isPresented: $reviewingIdentity) { IdentityReviewView(cardID: card.id) }
                 .sheet(isPresented: $retaking) { AddCardView(cardID: card.id).tint(.scoutAccent) }
+                .sheet(isPresented: $editingPrice) { PersonalPriceEditorView(cardID: card.id, price: card.personalPrice) }
                 .sheet(isPresented: $editingMetadata) { CardMetadataView(cardID: card.id) }
                 .fullScreenCover(isPresented: $photoExpanded) { CardPhotoViewer(cardID: card.id, initialBack: side == "Hinten") }
                 .toolbar {

@@ -30,7 +30,7 @@ struct ScanMatchView: View {
                             .buttonStyle(ScoutPrimaryButtonStyle())
                     } else if saved || card.isScanDraft != true {
                         Label(tr("In deiner Sammlung"), systemImage: "checkmark.circle.fill").font(.title2.bold()).foregroundStyle(Color.scoutAccent)
-                        Text(tr("Analyse läuft")).foregroundStyle(Color.scoutMuted)
+                        if card.isAwaitingAnalysis { Text(tr("Analyse läuft")).foregroundStyle(Color.scoutMuted) }
                         NavigationLink("Karte ansehen") { CardDetailView(cardID: cardID) }
                         Button(tr("Nächste Karte scannen")) { store.selectedTab = 3; if let onNext { onNext() } else { dismiss() } }.buttonStyle(ScoutPrimaryButtonStyle())
                     } else {
@@ -53,6 +53,7 @@ struct ScanMatchView: View {
                         } else if ["unavailable", "catalog"].contains(card.matchNotice ?? "") {
                             Text(tr("Vorschläge aus der Checkliste · ohne zusätzlichen Bildabgleich")).font(.caption).foregroundStyle(Color.scoutMuted)
                         }
+                        CardVariantPicker(card: card)
                         TextField(tr("Spieler, Nummer oder Set suchen"), text: $query)
                             .textFieldStyle(.roundedBorder).autocorrectionDisabled()
                         let matches = store.library.matches(for: card, query: query, limit: query.isEmpty ? 5 : 60)
@@ -108,7 +109,7 @@ struct ScanMatchView: View {
                             if store.collectScan(cardID, match: selection, folderID: folderID == "new" || folderID.isEmpty ? nil : folderID,
                                                  newFolderName: folderID == "new" ? newFolder : nil) { saved = true }
                         }.buttonStyle(ScoutPrimaryButtonStyle())
-                            .disabled((selection == nil && !noneFits) || (folderID == "new" && newFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                            .disabled(card.requestedVariantID != nil || (selection == nil && !noneFits) || (folderID == "new" && newFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
 
                     }
                 }.padding(20)
@@ -120,6 +121,15 @@ struct ScanMatchView: View {
                 while !Task.isCancelled && !saved && card?.isScanDraft == true && card?.awaitingBack != true {
                     await store.sync()
                     do { try await Task.sleep(for: .seconds(2)) } catch { break }
+                }
+            }
+            .onChange(of: card?.analysis?.collectionID, initial: true) { _, collectionID in
+                if !noneFits, selection == nil, let collectionID, card?.analysis?.identityConfirmed == true,
+                   let number = card?.analysis?.cardNumber { selection = CardMatch(collectionID: collectionID, number: number) }
+            }
+            .onChange(of: card?.state) { _, state in
+                if state == "analyzed", let a = card?.analysis, a.identityConfirmed == true, let collectionID = a.collectionID, let number = a.cardNumber {
+                    selection = CardMatch(collectionID: collectionID, number: number); noneFits = false
                 }
             }
             .onChange(of: card?.jobID) { _, _ in selection = nil; noneFits = false }
@@ -174,4 +184,81 @@ struct ScanDraftsView: View {
             }
         }.navigationTitle(tr("Scans vergleichen"))
     }
+}
+
+struct CardVariantPicker: View {
+    @Environment(AppStore.self) private var store
+    let card: OwnedCard
+    @State private var query = ""
+    var body: some View {
+        if let options = card.analysis?.currentPricing().cardSightVariants, !options.isEmpty, card.analysis?.cardSightIdentity != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(tr("Variante wählen")).font(.headline)
+                if options.contains(where: { $0.name.localizedCaseInsensitiveContains("refractor") }) {
+                    Text(tr("Prüfe, ob „Refractor“ auf deiner Karte steht.")).font(.subheadline).foregroundStyle(Color.scoutGold)
+                }
+                TextField(tr("Variante suchen"), text: $query).textFieldStyle(.roundedBorder).autocorrectionDisabled()
+                let ranks = ["High": 3, "Medium": 2, "Low": 1]
+                let ranked = options.sorted {
+                    let left = ranks[$0.confidence ?? ""] ?? 0, right = ranks[$1.confidence ?? ""] ?? 0
+                    return left == right ? $0.id < $1.id : left > right
+                }
+                ForEach(ranked.filter { query.isEmpty || $0.name.localizedStandardContains(query) }) { option in
+                    Button { store.selectVariant(card.id, variantID: option.id) } label: {
+                        HStack {
+                            ViewThatFits(in: .horizontal) {
+                                HStack(alignment: .top, spacing: 16) {
+                                    variantName(option)
+                                    Spacer(minLength: 8)
+                                    variantPrices(option)
+                                }.fixedSize(horizontal: true, vertical: false)
+                                VStack(alignment: .leading, spacing: 8) {
+                                    variantName(option)
+                                    variantPrices(option)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                            Image(systemName: card.analysis?.identityConfirmed == true && option.id == (card.analysis?.cardSightIdentity?.parallelID ?? "base") ? "checkmark.circle.fill" : "circle")
+                        }.frame(minHeight: 44).padding(.vertical, 6)
+                    }.buttonStyle(.plain).disabled(!card.hasCurrentAnalysis || card.requestedVariantID != nil)
+                }
+            }
+        }
+    }
+    private func variantName(_ option: CardSightVariant) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(option.name).multilineTextAlignment(.leading)
+            if option.confidence == "High" || option.confidence == "Medium" {
+                Text(tr("Vorschlag")).font(.caption).foregroundStyle(Color.scoutMuted)
+            }
+        }
+    }
+
+    private func variantPrices(_ option: CardSightVariant) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            variantPrice(option.medianCents, count: option.soldCount, currency: option.currency, shipping: option.soldShipping, asking: false)
+            variantPrice(option.askingMedianCents, count: option.askingCount, currency: option.askingCurrency, shipping: option.askingShipping, asking: true)
+        }
+    }
+
+    private func variantPrice(_ cents: Int?, count: Int?, currency: String?, shipping: String?, asking: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(trDisplay(asking ? "Angeboten für" : "Verkauft für"))
+                .font(.caption2).foregroundStyle(Color.scoutMuted)
+            HStack(spacing: 4) {
+                if let cents, cents > 0, let currency {
+                    Text((Double(cents) / 100).formatted(.currency(code: currency).locale(ScoutLocalization.locale)))
+                } else { Text(verbatim: "—").foregroundStyle(Color.scoutMuted) }
+            }.font(.subheadline.monospacedDigit())
+            if let cents, cents > 0, currency != nil {
+                if let count, count > 0 {
+                    Text(trDisplay(asking ? "Median · \(count) Angebote" : "Median · \(count) Verkäufe"))
+                        .font(.caption2).foregroundStyle(Color.scoutMuted)
+                }
+                if let shipping, let label = ["included": "inkl. Versand", "excluded": "zzgl. Versand", "unknown": "Versand unbekannt"][shipping] {
+                    Text(trDisplay(label)).font(.caption2).foregroundStyle(Color.scoutMuted)
+                }
+            }
+        }.accessibilityElement(children: .combine)
+    }
+
 }

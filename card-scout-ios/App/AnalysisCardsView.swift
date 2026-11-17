@@ -21,15 +21,15 @@ struct AnalysisCardsView: View {
 
             marketPanel.id("market")
 
-            InsightPanel(title: tr("Variante"), icon: "rectangle.stack", tint: .scoutGold, badge: a.discoveryRarity) {
+            if a.assessmentSource != "cardsight" || !a.rarityFacts.isEmpty { InsightPanel(title: tr("Variante"), icon: "rectangle.stack", tint: .scoutGold, badge: a.discoveryRarity) {
                 if a.rarityFacts.isEmpty {
                     Text(tr("Variante noch offen")).font(.subheadline).foregroundStyle(Color.scoutMuted)
                 } else {
                     InsightBullets(items: a.rarityFacts)
                 }
-            }.id("rarity")
+            }.id("rarity") }
 
-            InsightPanel(title: tr("Zustand"), icon: "viewfinder", tint: a.insights?.conditionStatus == "visible_damage" ? .scoutGold : .scoutAccent) {
+            if a.assessmentSource != "cardsight" { InsightPanel(title: tr("Zustand"), icon: "viewfinder", tint: a.insights?.conditionStatus == "visible_damage" ? .scoutGold : .scoutAccent) {
                 if let info = a.insights {
                     Text(trDisplay(info.conditionLabel)).font(.headline)
                     InsightBullets(items: info.conditionIssues)
@@ -44,9 +44,9 @@ struct AnalysisCardsView: View {
                 } else {
                     Text(tr("Foto-Check noch offen")).font(.subheadline).foregroundStyle(Color.scoutMuted)
                 }
-            }.id("condition")
+            }.id("condition") }
 
-            if !provisional && !assessmentCleared { ScoutPanel {
+            if !provisional && !assessmentCleared && a.assessmentSource != "cardsight" { ScoutPanel {
                 HStack(alignment: .top, spacing: 14) {
                     Image(systemName: recommendationSymbol)
                         .font(.title2).foregroundStyle(Color.scoutAccent)
@@ -97,7 +97,20 @@ struct AnalysisCardsView: View {
                 Text(tr("Bewertung offen")).font(.title2.weight(.semibold))
                 Text(tr("Deine Zuordnung ist gespeichert. „Neu bewerten“ prüft Zustand und Verkäufe.")).font(.footnote).foregroundStyle(Color.scoutMuted)
             } else if let info = a.insights {
-                if let summary = a.marketSummary {
+                if a.assessmentSource == "cardsight" || a.askingSummary != nil || a.marketSummary.map({ !$0.isEstimate }) == true {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 20) {
+                            marketPrice(summary: a.marketSummary.flatMap { $0.isEstimate ? nil : $0 }, asking: false)
+                            Divider().frame(height: 125)
+                            marketPrice(summary: a.askingSummary, asking: true)
+                        }.fixedSize(horizontal: true, vertical: false)
+                        VStack(alignment: .leading, spacing: 18) {
+                            marketPrice(summary: a.marketSummary.flatMap { $0.isEstimate ? nil : $0 }, asking: false)
+                            Divider()
+                            marketPrice(summary: a.askingSummary, asking: true)
+                        }
+                    }
+                } else if let summary = a.marketSummary {
                     VStack(alignment: .leading, spacing: 9) {
                         Text(trDisplay(summary.valueLabel))
                             .font(.system(.largeTitle, design: .rounded, weight: .bold))
@@ -124,7 +137,7 @@ struct AnalysisCardsView: View {
                                 }
                             }.font(.subheadline)
                         }
-                        if !summary.isComparable && summary.primary.provider == "CardSight" {
+                        if !summary.isComparable && summary.primary.provider == "CardSight" && a.assessmentSource != "cardsight" {
                             Text(tr("CardSight · gemeldete Auktionen · 24 Stunden verfügbar"))
                                 .font(.caption).foregroundStyle(Color.scoutMuted)
                         }
@@ -189,6 +202,28 @@ struct AnalysisCardsView: View {
             }
             if !provisional && !assessmentCleared { Text(tr("Geprüft: \(a.marketCheckedAt.prefix(10))")).font(.caption2).foregroundStyle(Color.scoutMuted) }
         }
+    }
+
+    private func marketPrice(summary: RawMarketSummary?, asking: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(trDisplay(asking ? "Angeboten für" : "Verkauft für"))
+                .font(.subheadline.weight(.semibold))
+            Text(summary.map { trDisplay($0.valueLabel) } ?? "—")
+                .font(.system(.title, design: .rounded, weight: .bold))
+                .foregroundStyle(asking ? Color.scoutInk : Color.scoutAccent)
+                .fixedSize(horizontal: false, vertical: true)
+            if let summary {
+                Text(trDisplay(summary.basisLabel)).font(.caption.weight(.medium))
+                Text(tr("Ungegradet · \(summary.primary.currency)"))
+                    .font(.caption).foregroundStyle(Color.scoutMuted)
+                Text(trDisplay(summary.primary.shippingLabel))
+                    .font(.caption).foregroundStyle(Color.scoutMuted)
+                Text(trDisplay(summary.dateLabel))
+                    .font(.caption2).foregroundStyle(Color.scoutMuted)
+            } else {
+                Text(tr("Keine Belege")).font(.caption).foregroundStyle(Color.scoutMuted)
+            }
+        }.accessibilityElement(children: .combine)
     }
 
     private var cardData: some View {
@@ -317,13 +352,15 @@ private struct MarketReferenceView: View {
             }
             if let condition = reference.condition { Text(tr("Zustand laut Quelle: \(condition)")).font(.caption) }
             Text(trDisplay(reference.shippingLabel)).font(.caption)
-            if let date = reference.saleDate { Text(tr("Verkauft: \(date)")).font(.caption) }
+            if reference.kind == "ask" {
+                Text(tr("Stand: \(reference.checkedAt)")).font(.caption)
+            } else if let date = reference.saleDate { Text(tr("Verkauft: \(date)")).font(.caption) }
             if let url = URL(string: reference.url) {
                 Link(destination: url) { Label(trDisplay(reference.provider), systemImage: "arrow.up.right").padding(.vertical, 4) }
                     .font(.caption.weight(.semibold))
             }
             if let value = reference.listingURL, let url = URL(string: value) {
-                Link(destination: url) { Label(tr("eBay-Verkauf"), systemImage: "arrow.up.right").padding(.vertical, 4) }
+                Link(destination: url) { Label(trDisplay(reference.kind == "ask" ? "eBay-Angebot" : "eBay-Verkauf"), systemImage: "arrow.up.right").padding(.vertical, 4) }
                     .font(.caption.weight(.semibold))
             }
         }.foregroundStyle(Color.scoutMuted).padding(14)

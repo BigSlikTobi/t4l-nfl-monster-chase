@@ -98,7 +98,12 @@ extension Library {
             else { let created = CardFolder(name: name); updated.folders = (updated.folders ?? []) + [created]; folder = created.id }
         }
         if let folder, updated.folders?.contains(where: { $0.id == folder }) != true { throw StoreError.invalidResult }
-        if let match {
+        if let match, updated.cards[index].hasCurrentAnalysis,
+           let a = updated.cards[index].analysis, a.assessmentSource == "cardsight",
+           a.cardSightIdentity != nil, a.identityConfirmed == true,
+           a.collectionID == match.collectionID, a.cardNumber == match.number {
+            // Accept the identified card without uploading it for another assessment.
+        } else if let match {
             if updated.cards[index].analysis == nil {
                 updated.cards[index].analysis = CardAnalysis(recommendation: "Keep", marketCheckedAt: "", marketSources: [], confidence: "low", conditionNotes: "", rationale: "", needsReview: true)
             }
@@ -134,4 +139,52 @@ extension Library {
         }
         self = updated
     }
+}
+
+// A user choice gets its own job revision. The server accepts only variants from
+// its previous result for the same photos, and reuses the shared price snapshot.
+extension Library {
+    public mutating func selectCardSightVariant(cardID: String, variantID: String) throws {
+        guard let i = cards.firstIndex(where: { $0.id == cardID }), cards[i].hasCurrentAnalysis,
+              var a = cards[i].analysis, a.cardSightIdentity != nil,
+              a.cardSightVariants?.contains(where: { $0.id == variantID }) == true else { throw StoreError.invalidResult }
+        if a.identityConfirmed == true && (a.cardSightIdentity?.parallelID ?? "base") == variantID { return }
+        cards[i].refreshOfJobID = cards[i].jobID
+        cards[i].analysisJobID = UUID().uuidString.lowercased()
+        cards[i].requestedVariantID = variantID
+        cards[i].uploadedJobID = nil
+        cards[i].error = nil
+        cards[i].state = "queued"
+        cards[i].preservesPreviousAnalysis = true
+        a.insights?.marketReferences = []
+        a.marketSources = []; a.marketLowCents = nil; a.marketHighCents = nil; a.comparableEstimate = nil
+        a.unpricedBaseExpiresAt = nil
+        // Do not show the previous variant's value while the choice is applied.
+        cards[i].analysis = a
+    }
+
+    /// An HTTP rejection applies only to the still-pending revision.
+    @discardableResult
+    public mutating func rejectCardSightVariant(cardID: String, jobID: String, previousAnalysis: CardAnalysis?,
+                                                error: String) -> Bool {
+        guard let i = cards.firstIndex(where: { $0.id == cardID && $0.jobID == jobID }),
+              cards[i].requestedVariantID != nil, cards[i].preservesPreviousAnalysis == true,
+              let previous = cards[i].refreshOfJobID, previous != jobID, let saved = cards[i].analysis,
+              let identity = saved.cardSightIdentity else { return false }
+        if let prior = previousAnalysis, prior.cardSightIdentity == identity, prior.player == saved.player,
+           prior.year == saved.year, prior.brand == saved.brand, prior.setName == saved.setName,
+           prior.subset == saved.subset, prior.cardNumber == saved.cardNumber, prior.parallel == saved.parallel,
+           prior.serialNumber == saved.serialNumber {
+            cards[i].analysis = prior.currentPricing()
+        }
+        cards[i].analysisJobID = previous == cardID ? nil : previous
+        cards[i].uploadedJobID = previous
+        cards[i].refreshOfJobID = nil
+        cards[i].requestedVariantID = nil
+        cards[i].preservesPreviousAnalysis = false
+        cards[i].state = "analyzed"
+        cards[i].error = error
+        return true
+    }
+
 }

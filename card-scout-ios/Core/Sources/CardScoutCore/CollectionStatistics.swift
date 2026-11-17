@@ -57,14 +57,26 @@ public struct CollectionCardValue: Codable, Identifiable, Equatable, Sendable {
     public let checkedAt: String
     public var isGuide: Bool = false
     public var isCached: Bool = false
-    public var isPortfolioEligible: Bool { !isEstimate || isGuide }
+    public var isPersonal: Bool = false
+    var unpricedBaseExpiresAt: Double? = nil
+    public var isUnpricedBase: Bool { unpricedBaseExpiresAt != nil }
+    public var isPortfolioEligible: Bool { !isEstimate || isGuide || isPersonal || isUnpricedBase }
     public var label: String {
         let low = Self.money(lowCents, currency: currency)
         let price = lowCents == highCents ? low : "\(low) – \(Self.money(highCents, currency: currency))"
-        return isEstimate ? "ca. \(price)" : price
+        return isEstimate && !isUnpricedBase ? "ca. \(price)" : price
     }
     public static func money(_ cents: Int, currency: String) -> String {
         (Double(cents) / 100).formatted(.currency(code: currency).locale(ScoutLocalization.locale).precision(.fractionLength(0...2)))
+    }
+}
+
+extension OwnedCard {
+    public func unpricedBaseValue(asOf: Date = Date()) -> CollectionCardValue? {
+        guard hasCurrentAnalysis, let analysis, analysis.hasUnpricedBaseAllowance(asOf: asOf) else { return nil }
+        return CollectionCardValue(cardID: id, currency: "EUR", lowCents: 0, highCents: 0,
+            isEstimate: true, basis: "Sammlungswert · Basiskarte", checkedAt: analysis.marketCheckedAt,
+            unpricedBaseExpiresAt: analysis.unpricedBaseExpiresAt)
     }
 }
 
@@ -84,11 +96,12 @@ public struct CollectionStatistics: Sendable {
     public let distinctPlayers: Int
     public let purchases: [CardPurchase]
     public let values: [CollectionCardValue]
+    public let personalValues: [CollectionCardValue]
     public let specialCardID: String?
     public let specialReason: String?
     public let growth: [CollectionGrowthPoint]
     public var pricedCards: Int { values.filter { !$0.isEstimate }.count }
-    public var indicativeCards: Int { values.filter(\.isEstimate).count }
+    public var indicativeCards: Int { values.filter { $0.isEstimate && !$0.isUnpricedBase }.count }
     public var nextMilestone: Int { [10, 25, 50, 100, 250, 500, 1000].first { $0 > totalCards } ?? ((totalCards / 1000) + 1) * 1000 }
     public var spendingCurrencies: [String] { Array(Set(purchases.map(\.currency))).sorted() }
     public var valueCurrencies: [String] { Array(Set(values.map(\.currency))).sorted() }
@@ -113,7 +126,7 @@ public struct CollectionStatistics: Sendable {
             return $0.cardID < $1.cardID
         }
     }
-    public init(library: Library, asOf: Date = Date(), calendar: Calendar = .current, cachedValues: [CollectionCardValue] = []) {
+    public init(library: Library, asOf: Date = Date(), calendar: Calendar = .current, cachedValues: [CollectionCardValue] = [], includePersonal: Bool = true) {
         let cards = library.collectedCards
         let analyzed = cards.filter(\.hasCurrentAnalysis)
         let readable = analyzed.filter { $0.analysis?.player != nil && $0.analysis?.confidence != "low" }
@@ -131,10 +144,19 @@ public struct CollectionStatistics: Sendable {
         purchases = (library.purchases ?? []).filter { $0.isValid && $0.purchasedOn <= purchaseDate.string(from: asOf) }.sorted {
             $0.purchasedOn == $1.purchasedOn ? $0.id > $1.id : $0.purchasedOn > $1.purchasedOn
         }
+        personalValues = cards.compactMap { card in
+            guard let price = card.personalPrice, price.isValid else { return nil }
+            return CollectionCardValue(cardID: card.id, currency: price.currency, lowCents: price.amountCents,
+                highCents: price.amountCents, isEstimate: true, basis: "Dein Preis", checkedAt: price.recordedAt, isPersonal: true)
+        }
         let currentValues = analyzed.compactMap { Self.cardValue($0, asOf: asOf) }
         let currentIDs = Set(currentValues.map(\.cardID))
         let analyzedIDs = Set(analyzed.map(\.id))
-        values = currentValues + cachedValues.filter { !currentIDs.contains($0.cardID) && analyzedIDs.contains($0.cardID) }
+        let researched = currentValues + cachedValues.filter { !$0.isUnpricedBase && !currentIDs.contains($0.cardID) && analyzedIDs.contains($0.cardID) }
+        let researchedIDs = Set(researched.map(\.cardID))
+        let accounted = researched + analyzed.compactMap { researchedIDs.contains($0.id) ? nil : $0.unpricedBaseValue(asOf: asOf) }
+        let personalIDs = Set(personalValues.map(\.cardID))
+        values = includePersonal ? personalValues + accounted.filter { !personalIDs.contains($0.cardID) } : accounted
         let special = readable.compactMap { card -> (OwnedCard, Int, String)? in
             if let limit = Self.serialLimit(card.analysis?.serialNumber) {
                 return (card, limit, limit == 1 ? "Sichtbar nummeriert: 1/1" : "Sichtbar nummeriert: \(card.analysis!.serialNumber!)")
@@ -185,7 +207,7 @@ public struct CollectionStatistics: Sendable {
             else { key = "\(url)|\(reference.saleDate ?? "")|\(reference.lowCents)|\(reference.currency)|\(reference.shipping)" }
             return seenReferences.insert(key).inserted
         }
-        if let summary = info.marketSummary(asOf: asOf) ?? analysis.comparableEstimate?.marketSummary(asOf: asOf), analysis.identityConfirmed == true {
+        if let summary = info.valuationSummary(asOf: asOf) ?? analysis.comparableEstimate?.marketSummary(asOf: asOf), analysis.identityConfirmed == true {
             let low = summary.isGuide ? summary.primary.lowCents : Int(summary.orderingValueCents.rounded())
             return CollectionCardValue(cardID: card.id, currency: summary.primary.currency, lowCents: low,
                 highCents: summary.isGuide ? summary.primary.highCents : low, isEstimate: summary.isEstimate,

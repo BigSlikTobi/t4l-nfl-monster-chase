@@ -54,7 +54,7 @@ systemd-run --quiet --wait --pipe --collect --unit=cardscout-sandbox-check \
     --property=ReadWritePaths=/var/lib/cardscout --working-directory=/var/lib/cardscout \
     /usr/bin/env CODEX_HOME=/var/lib/cardscout/data/codex \
     /opt/cardscout/node_modules/.bin/codex --sandbox read-only sandbox /usr/bin/true
-for module in reference_images scan_matches catalog_supplement server analysis api_client retrieval card_prices raw_guides schema chases cardsight cardsight_pilot linux setup; do
+for module in dev reference_images scan_matches catalog_supplement server analysis api_client retrieval card_prices card_lookup listing_decisions identity_decisions card_price_batch raw_guides schema chases cardsight cardsight_pilot linux setup; do
     install -m 0644 "$source_dir/mac/$module.py" "/opt/cardscout/service/$module.py"
 done
 install -m 0644 "$source_dir/mac/retrieve_page.cjs" /opt/cardscout/service/retrieve_page.cjs

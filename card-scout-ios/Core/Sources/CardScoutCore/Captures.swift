@@ -127,7 +127,7 @@ extension Library {
         analysis.cardNumber = entry.number; analysis.rookie = entry.rookie; analysis.serialNumber = nil
         analysis.identityConfirmed = true; analysis.confidence = "high"; analysis.clearAssessmentAfterCorrection()
         cards[index].analysis = analysis; cards[index].state = "analyzed"; cards[index].error = nil
-        cards[index].refreshOfJobID = nil; cards[index].manualAssignment = true
+        cards[index].refreshOfJobID = nil; cards[index].requestedVariantID = nil; cards[index].manualAssignment = true
         cards[index].hasProvisionalAnalysis = false
         cards[index].requestedAnalysisVersion = OwnedCard.currentAnalysisVersion
     }

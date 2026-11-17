@@ -50,10 +50,15 @@ public struct BurnCount: Sendable {
         let purchases = statistics.purchases.filter { $0.currency == currency && [.card, .pack, .box].contains($0.category) }
         spentCents = purchases.isEmpty ? nil : purchases.reduce(0) { $0 + $1.amountCents }
         purchaseCount = purchases.count
-        let value = statistics.estimatedCollectionValue(currency: currency)
-        includesComparisonEstimates = statistics.values.contains { $0.currency == currency && !$0.isPortfolioEligible }
+        let personalIDs = Set(statistics.personalValues.map(\.cardID))
+        let values = (statistics.values.filter { !personalIDs.contains($0.cardID) } + statistics.personalValues)
+            .filter { $0.currency == currency }
+        let value = values.isEmpty ? nil : (low: values.reduce(0) { $0 + $1.lowCents }, high: values.reduce(0) { $0 + $1.highCents })
+        includesComparisonEstimates = values.contains { !$0.isPortfolioEligible }
         valueLowCents = manual ?? value?.low; valueHighCents = manual ?? value?.high
-        pricedCards = statistics.values.filter { $0.currency == currency }.count
+        // A qualified zero contributes to coverage in a priced currency without converting any money.
+        let otherBaseZeros = statistics.values.filter { $0.isUnpricedBase && $0.currency != currency }
+        pricedCards = values.count + (values.isEmpty ? 0 : otherBaseZeros.count)
         totalCards = statistics.totalCards
     }
 }
@@ -64,21 +69,30 @@ public struct ManualBurnValue: Codable, Equatable, Sendable {
     public let currency: String
     public let recordedAt: Date
     public let cardIDs: [String]
+    public var personalPrices: [String: PersonalCardPrice]? = nil
 }
 
 extension Library {
     public func currentManualBurnValue(currency: String) -> ManualBurnValue? {
         guard let value = burnManualValues?[currency], value.currency == currency,
               (0...100_000_000).contains(value.amountCents),
-              value.cardIDs == collectedCards.map(\.id).sorted() else { return nil }
+              value.cardIDs == collectedCards.map(\.id).sorted(),
+              (value.personalPrices ?? [:]) == personalPriceSnapshot else { return nil }
         return value
+    }
+    private var personalPriceSnapshot: [String: PersonalCardPrice] {
+        Dictionary(uniqueKeysWithValues: collectedCards.compactMap { card in
+            card.personalPrice.map { (card.id, $0) }
+        })
     }
     public mutating func setManualBurnValue(amountCents: Int?, currency: String, asOf: Date = Date()) throws {
         guard CardPurchase.currencies.contains(currency) else { throw StoreError.invalidResult }
         if let amountCents {
             guard (0...100_000_000).contains(amountCents), !collectedCards.isEmpty else { throw StoreError.invalidResult }
             var values = burnManualValues ?? [:]
-            values[currency] = ManualBurnValue(amountCents: amountCents, currency: currency, recordedAt: asOf, cardIDs: collectedCards.map(\.id).sorted())
+            var value = ManualBurnValue(amountCents: amountCents, currency: currency, recordedAt: asOf, cardIDs: collectedCards.map(\.id).sorted())
+            value.personalPrices = personalPriceSnapshot
+            values[currency] = value
             burnManualValues = values
         } else { burnManualValues?.removeValue(forKey: currency) }
     }

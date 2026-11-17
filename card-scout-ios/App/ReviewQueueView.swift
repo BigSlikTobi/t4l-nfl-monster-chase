@@ -6,7 +6,7 @@ struct ReviewQueueView: View {
     @State private var reviewing: OwnedCard?
     private var identityCards: [OwnedCard] { store.library.collectedCards.filter { ReviewIssue.identity($0) != nil } }
     private var unpriced: [OwnedCard] {
-        store.library.collectedCards.filter { $0.hasCurrentAnalysis && ReviewIssue.identity($0) == nil && $0.analysis?.marketSummary == nil }
+        store.library.collectedCards.filter { $0.hasCurrentAnalysis && ReviewIssue.identity($0) == nil && $0.analysis?.marketSummary == nil && $0.analysis?.askingSummary == nil && $0.unpricedBaseValue() == nil }
     }
     var body: some View {
         List {

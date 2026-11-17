@@ -7,7 +7,7 @@ struct ClubhouseHomeView: View {
     @State private var selectedCurrency = ""
     var body: some View {
         let stats = store.dashboardStatistics
-        let currencies = Array(Set(stats.spendingCurrencies + stats.valueCurrencies + Array((store.library.burnManualValues ?? [:]).keys))).sorted()
+        let currencies = Array(Set(stats.spendingCurrencies + stats.valueCurrencies + stats.personalValues.map(\.currency) + Array((store.library.burnManualValues ?? [:]).keys))).sorted()
         let currency = currencies.contains(selectedCurrency) ? selectedCurrency : (currencies.contains(preferredBurnCurrency(stats)) ? preferredBurnCurrency(stats) : currencies.first ?? "EUR")
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -75,7 +75,7 @@ private struct ClubhouseIdentityHeader: View {
 }
 
 func preferredBurnCurrency(_ stats: CollectionStatistics) -> String {
-    let currencies = Array(Set(stats.spendingCurrencies + stats.valueCurrencies)).sorted()
+    let currencies = Array(Set(stats.spendingCurrencies + stats.values.filter { !$0.isUnpricedBase }.map(\.currency) + stats.personalValues.map(\.currency))).sorted()
     return currencies.first(where: { $0 == "EUR" }) ?? currencies.first ?? "EUR"
 }
 
@@ -232,7 +232,7 @@ struct BurnCountDetailView: View {
     @State private var editingValue = false
     var body: some View {
         let stats = store.dashboardStatistics
-        let currencies = Array(Set(stats.spendingCurrencies + stats.valueCurrencies + [initialCurrency])).sorted()
+        let currencies = Array(Set(stats.spendingCurrencies + stats.valueCurrencies + stats.personalValues.map(\.currency) + [initialCurrency])).sorted()
         let currency = currencies.contains(selectedCurrency) ? selectedCurrency : initialCurrency
         let burn = BurnCount(statistics: stats, currency: currency, manualValueCents: store.library.currentManualBurnValue(currency: currency)?.amountCents)
         ScrollView {

@@ -1,5 +1,28 @@
 # Card Scout — iPhone + Mac
 
+The new scan route sends the front photo to CardSight and keeps the returned card
+UUID. The current source fetches recent raw auction and fixed-price listings by
+UUID. Decisions checks listing identity against the already identified card.
+The app displays separate **Sold for** and **Listed at** medians. The collection and Burn Count use the median asking price first, then the existing sold-price fallback. Eligible ordinary base cards without an exact price count at €0. Prices are reused from a private
+24-hour cache. Identification now checks provider confidence against on-device
+OCR. Medium/low results and contradictions escalate to automatic Decisions
+checks of card candidates and parallels. Unresolved identities remain unpriced.
+The local worker now keeps card-scoped partial finishes, checks the selected
+finish's listings first, and reuses the same snapshot on a variant switch.
+See the [validation changes and recorded-request replay](docs/card-validation-optimization-2026-11-17.md).
+See [confidence routing](docs/confidence-routing-2026-11-17.md) and
+[quality and parallel requests](docs/quality-and-parallel-requests-2026-11-17.md).
+See [listing decisions and separate prices](docs/listing-decisions-and-prices-2026-11-17.md)
+for the implementation and earlier verification results.
+See [direct lookup, activation and limits](docs/direct-card-lookup-2026-11-17.md).
+Build **1.1 (52)** was installed on the paired iPhone. The asking-first dashboard was verified against the completed 108-scan run.
+See [variant search and switching](docs/variant-search-2026-11-17.md) for the
+shared all-variant snapshot and searchable variant picker.
+Developer-only checks are available through `python3 mac/dev.py`: quota,
+authenticated worker health, queue counts, and a combined doctor report.
+See [developer CLI](docs/developer-cli.md). No quota UI or endpoint is added to the app.
+The build/deployment notes below describe earlier workflows.
+
 Build **40** shows a **comparison median** instead of a broad comparison range as
 the headline. For €1, €1, €1 and €8, it shows **ca. €1**, with the €1–€8 range as
 supporting detail. Collection sorting and indicative totals use the same median.
@@ -532,3 +555,26 @@ amount and sign kept together. Threshold/range cases were covered by core tests.
 Installed in place on MyApple; fresh device inventory confirmed Burn Count
 1.1 (47). Automatic phone launch was denied because the device was locked;
 physical-device visual and collection-content acceptance remain user checks.
+
+### Personal card prices
+
+Open a collected card and tap **Your price / Dein Preis** to add, edit or remove
+an amount in EUR, USD or GBP. Both decimal dots and commas are accepted. An
+explicit zero is valid; a blank amount is unknown and cannot be saved.
+
+Personal prices persist locally with the card and appear in the card gallery.
+Value sorting uses them without converting currencies. Burn Count uses each
+personal price in place of that card's researched or cached value, once per
+physical card. Personal prices also drive portfolio totals and rankings. Research evidence and purchase
+expenses stay separate. Manual price changes are excluded from market-change calculations. A changed per-card estimate invalidates the previous
+manual collection-total estimate; that older total remains stored. Entering a
+new total explicitly overrides the current per-card amounts again.
+
+Validation (2026-11-07): 192 Swift tests (one existing skip, no failures),
+253 Python worker tests, localization audit (847 bilingual keys, 98 templates),
+Debug simulator build and shared-image source audit passed. Isolated simulator
+QA covered comma-decimal entry, add, edit, currency change, cancel, removal and
+persistence across restart/update. The before/after preservation check passed
+for all 100 synthetic cards/analyses, four collections and 12 original demo
+photos after price removal. No physical-device install or acceptance check was
+performed for this change.

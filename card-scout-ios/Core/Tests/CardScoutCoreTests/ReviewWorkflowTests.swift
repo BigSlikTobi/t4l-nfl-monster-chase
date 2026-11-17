@@ -47,6 +47,9 @@ final class ReviewWorkflowTests: XCTestCase {
         XCTAssertTrue(UnclearCardQueue.isEligible(card))
         card.analysis?.parallel = "Orange Scope"
         XCTAssertNil(ReviewIssue.identity(card))
+        card.state = "failed"
+        XCTAssertEqual(ReviewIssue.identity(card)?.kind, .retry)
+        card.state = "analyzed"
         card.analysis?.parallel = "Blue Hyper"; card.analysis?.serialNumber = nil; card.analysis?.cardNumber = "84"
         XCTAssertEqual(ReviewIssue.identity(card)?.kind, .conflict)
     }

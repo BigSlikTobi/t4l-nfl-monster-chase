@@ -107,6 +107,7 @@
 "Base, Chrome, Optic oder Variante" = "Base, Chrome, Optic or variant";
 "Basis & Inserts · ohne Parallels\nRaw · ohne Versand" = "Base & inserts · no parallels\nRaw · shipping excluded";
 "Basiskarte" = "Base card";
+"Sammlungswert · Basiskarte" = "Collection value · Base card";
 "Begründung" = "Reason";
 "Behalten" = "Keep";
 "Beide Fotos sind vorhanden. Erst erneut prüfen oder einen passenden Eintrag auswählen; neue Fotos sind nicht automatisch nötig." = "Both photos saved. Review or select a match before retaking.";
@@ -851,3 +852,22 @@
 "Vorherige Karte" = "Previous card";
 
 "Karte umdrehen" = "Flip card";
+"Dein Preis" = "Your price";
+"Preis hinzufügen" = "Add price";
+"Preis entfernen" = "Remove price";
+"Persönliche Schätzung für Burn Count." = "Personal estimate for Burn Count.";
+"Preis konnte nicht gespeichert werden." = "Could not save price.";
+
+"Variante wählen" = "Choose variant";
+"Variante suchen" = "Search variants";
+"Prüfe, ob „Refractor“ auf deiner Karte steht." = "Check for “Refractor” on your card.";
+"Vorschlag" = "Suggested";
+
+"Angeboten für" = "Listed at";
+"Verkauft für" = "Sold for";
+"Angebot" = "Listing";
+"Einzelangebot" = "Single listing";
+"Median · %1$@ Angebote" = "Median · %1$@ listings";
+"Keine Belege" = "No evidence";
+"Ungegradet · %1$@" = "Raw · %1$@";
+"eBay-Angebot" = "eBay listing";

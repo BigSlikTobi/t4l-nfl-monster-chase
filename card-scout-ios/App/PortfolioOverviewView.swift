@@ -10,8 +10,12 @@ struct PortfolioDashboardContent: View {
     @State private var selectedCurrency = ""
     var body: some View {
         let snapshot = store.dashboardStatistics
-        let currencies = Array(Set(snapshot.values.map(\.currency) + (store.library.portfolioHistory?.last?.values.map(\.currency) ?? []))).sorted()
-        let currency = currencies.contains(selectedCurrency) ? selectedCurrency : currencies.first(where: { $0 == "EUR" }) ?? currencies.first ?? "EUR"
+        let historical = store.library.portfolioHistory?.last?.values ?? []
+        let currencies = Array(Set(snapshot.values.map(\.currency) + historical.map(\.currency))).sorted()
+        let pricedCurrencies = (snapshot.values.filter { !$0.isUnpricedBase }.map(\.currency) +
+            historical.filter { $0.comparisonKey != "unpriced-base" }.map(\.currency)).sorted()
+        let preferred = pricedCurrencies.first(where: { $0 == "EUR" }) ?? pricedCurrencies.first ?? currencies.first ?? "EUR"
+        let currency = currencies.contains(selectedCurrency) ? selectedCurrency : preferred
         VStack(alignment: .leading, spacing: 26) {
             if section == .value && currencies.count > 1 {
                 Picker(tr("Währung · ohne Umrechnung"), selection: Binding(get: { currency }, set: { selectedCurrency = $0 })) {
@@ -191,6 +195,7 @@ struct PortfolioDashboardContent: View {
 }
 
 struct RecommendationCardRow: View {
+    @Environment(AppStore.self) private var store
     let card: OwnedCard
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -199,7 +204,7 @@ struct RecommendationCardRow: View {
                 Text(cardTitle(card)).font(.headline).foregroundStyle(Color.scoutInk)
                 Text(card.analysis?.insights?.actionReason ?? card.analysis?.rationale ?? "")
                     .font(.subheadline).foregroundStyle(Color.scoutMuted).fixedSize(horizontal: false, vertical: true)
-                Text(trDisplay(card.analysis?.marketSummary?.valueLabel ?? "Rohwert offen"))
+                Text(card.personalPrice.flatMap { $0.isValid ? CollectionCardValue.money($0.amountCents, currency: $0.currency) : nil } ?? trDisplay(card.analysis?.valuationSummary?.valueLabel ?? store.unpricedBaseDisplayValue(for: card)?.label ?? "Rohwert offen"))
                     .font(.caption.bold()).foregroundStyle(Color.scoutAccent)
                 if card.analysis?.recommendation == "Grade" {
                     Text(tr("Foto-Check: keine klaren Schäden sichtbar · keine Grading-Note"))

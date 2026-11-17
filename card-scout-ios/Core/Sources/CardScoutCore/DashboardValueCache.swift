@@ -24,11 +24,12 @@ public struct DashboardValueCache: Codable, Sendable {
         card.analysis?.knownIdentityConflict == nil && entry.jobID == card.jobID && entry.identity == identity(card)
     }
     public func values(in library: Library) -> [CollectionCardValue] {
-        library.collectedCards.compactMap { card in
-            guard let entry = entries[card.id], matches(entry, card) else { return nil }
-            var value = entry.value; value.isCached = true
-            return value
-        }
+        library.collectedCards.compactMap { value(for: $0) }
+    }
+    public func value(for card: OwnedCard) -> CollectionCardValue? {
+        guard let entry = entries[card.id], matches(entry, card) else { return nil }
+        var value = entry.value; value.isCached = true
+        return value
     }
     public func portfolioValues(in library: Library, asOf: Date = Date()) -> [PortfolioCardValue] {
         library.collectedCards.compactMap { card in
@@ -42,6 +43,8 @@ public struct DashboardValueCache: Codable, Sendable {
     }
     public mutating func update(card: OwnedCard, value: CollectionCardValue?, refreshAfter: Date, asOf: Date = Date(), portfolioValue: PortfolioCardValue? = nil) {
         guard let value else { entries.removeValue(forKey: card.id); return }
+        // The expiring allowance lives on the analysis. Preserve the last researched amount.
+        guard !value.isUnpricedBase else { return }
         entries[card.id] = Entry(jobID: card.jobID, identity: identity(card), value: value,
             savedAt: asOf, refreshAfter: min(refreshAfter, asOf.addingTimeInterval(86400)), portfolioValue: portfolioValue)
     }

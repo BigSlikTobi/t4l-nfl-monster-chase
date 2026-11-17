@@ -11,6 +11,7 @@ import time
 
 from cardsight import Client, MarketError, atomic, matching_sale, normal, sale_url
 import raw_guides
+from card_price_batch import BatchClient, PricingPending
 
 FIELDS = ("player", "year", "brand", "setName", "subset", "cardNumber", "parallel", "serialNumber")
 TTL = 86400
@@ -68,6 +69,10 @@ def identity_key(a):
     return hashlib.sha256(json.dumps({k: a.get(k) for k in FIELDS}, sort_keys=True).encode()).hexdigest()
 
 
+def catalog_release(a):
+    return raw_guides.catalog_release(a)
+
+
 def eligible(a):
     bowman = (a.get("setName") == "Bowman" and a.get("brand") == "Topps" and a.get("year") == 2026
               and a.get("subset") in ("Base", "Chrome Base", "Chrome Prospects", "Paper Prospects"))
@@ -81,7 +86,7 @@ def eligible(a):
             and all(a.get(k) for k in ("player", "year", "setName", "subset", "cardNumber"))
             and (not a.get("serialNumber") or (a.get("parallel") and serial_tier(a["serialNumber"]) is not None))
             and variant_name(a.get("parallel")) not in ("unknown", "unbekannt", "unklar", "nicht bestimmbar", "nicht sicher bestimmbar")
-            and (bowman or a.get("setName") in ("Topps Chrome", "Donruss Optic", "Topps Flagship Football", "Select", "Prizm")))
+            and (bowman or catalog_release(a) in ("Topps Chrome", "Donruss Optic", "Topps Flagship Football", "Select", "Prizm")))
 
 
 def catalog_subset(a):
@@ -100,6 +105,10 @@ class PriceResearch:
         self.lock = threading.RLock()
         self.pending_lock = threading.Lock()
         self.pending = set()
+        self.queued = {}
+        self.drain_scheduled = False
+        self.batch_guides = None
+        self.last_batch_stats = {}
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="card-price")
         self.purge()
 
@@ -141,13 +150,64 @@ class PriceResearch:
         if existing and not self.needs_guide(a, existing): return
         key = identity_key(a)
         with self.pending_lock:
-            if key in self.pending or len(self.pending) >= 32: return
+            if key in self.pending or len(self.pending) >= 100: return
             self.pending.add(key)
-        def work():
-            try: self.lookup(a)
+            self.queued[key] = deepcopy(a)
+            if self.drain_scheduled: return
+            self.drain_scheduled = True
+        self.executor.submit(self.drain)
+
+    def drain(self):
+        while True:
+            # Coalesce collection refreshes without holding the HTTP thread.
+            time.sleep(0.25)
+            with self.pending_lock:
+                if not self.queued:
+                    self.drain_scheduled = False
+                    return
+                batch = list(self.queued.values())
+                self.queued.clear()
+            try:
+                self.lookup_many(batch)
+            except Exception:
+                # Release scheduling ownership even after an internal failure.
+                # A later explicit refresh can retry without a stuck queue.
+                with self.pending_lock:
+                    self.pending.difference_update(self.queued)
+                    self.queued.clear()
+                    self.drain_scheduled = False
+                return
             finally:
-                with self.pending_lock: self.pending.discard(key)
-        self.executor.submit(work)
+                with self.pending_lock:
+                    for a in batch: self.pending.discard(identity_key(a))
+
+    def lookup_many(self, analyses):
+        if len(analyses) > 100: raise ValueError("At most 100 owned cards per price batch")
+        with self.lock:
+            original = self.client
+            batch = BatchClient(original)
+            batch.configure_catalog([a for a in analyses if eligible(a)], catalog_release, catalog_subset)
+            self.client = batch
+            self.batch_guides = {}
+            values = {}
+            remaining = {identity_key(a): deepcopy(a) for a in analyses}
+            try:
+                # A card has at most four catalog price buckets (variant/base,
+                # recent/year). GETs and free-guide results are reused on replay.
+                for _ in range(6):
+                    waiting = {}
+                    for key, a in remaining.items():
+                        try: values[key] = self.lookup(a)
+                        except PricingPending: waiting[key] = a
+                    if not waiting: return values
+                    batch.flush()
+                    remaining = waiting
+                raise ValueError("Price batch did not converge")
+            finally:
+                self.last_batch_stats = {"cards": len(analyses), "requests": batch.requests,
+                                         "pricingRequests": batch.pricing_requests}
+                self.batch_guides = None
+                self.client = original
 
     def lookup(self, a):
         if not eligible(a): return None
@@ -169,9 +229,9 @@ class PriceResearch:
                 # The usage check is counted and shared with product rankings.
                 self.client.request("GET", "/v1/subscription/")
                 cards = self.client.request("GET", "/v1/catalog/cards", {"name": a["player"], "number": a["cardNumber"],
-                    "releaseName": a["setName"], "year": str(a["year"]), "take": 100})
+                    "releaseName": catalog_release(a), "year": str(a["year"]), "take": 100})
                 candidates = [c for c in cards.get("cards", []) if normal(c.get("name")) == normal(a["player"])
-                    and str(c.get("number")) == a["cardNumber"] and c.get("releaseName") == a["setName"]
+                    and str(c.get("number")) == a["cardNumber"] and c.get("releaseName") == catalog_release(a)
                     and str(c.get("releaseYear")) == str(a["year"]) and normal(c.get("setName")) == normal(catalog_subset(a))
                     and not c.get("variationOf") and not c.get("isParallelOnly") and not c.get("description")]
                 if cards.get("total_count", 0) > 100 or len(candidates) != 1: raise NoExactMatch("catalog_not_exact")
@@ -207,7 +267,7 @@ class PriceResearch:
                 parallel_id = variant["id"] if variant else None
                 def records_for(requested_parallel, period):
                     response = self.client.request("POST", "/v1/pricing/", body={"card_ids": [card["id"]], "parallel_id": requested_parallel,
-                        "grade_id": None, "period": period, "listing_type": "auction", "limit": 25})
+                        "grade_id": None, "period": period, "listing_type": "auction", "limit": 50})
                     results = response.get("results", [])
                     if len(results) != 1 or results[0].get("card_id") != card["id"] or not results[0].get("success"): raise ValueError("Incomplete price response")
                     data = results[0]["data"]
@@ -217,8 +277,8 @@ class PriceResearch:
                     if context.get("card_id") != card["id"] or context.get("set", {}).get("set_id") != card["setId"]: raise ValueError("Wrong card context")
                     if requested_parallel and context.get("parallel", {}).get("parallel_id") != requested_parallel: raise ValueError("Wrong parallel context")
                     records = data.get("raw", {}).get("records", [])
-                    if not isinstance(records, list) or len(records) > 25 or any(not isinstance(r, dict) for r in records): raise ValueError("Unexpected record count")
-                    return records, bool(data.get("messages")) or len(records) == 25
+                    if not isinstance(records, list) or len(records) > 50 or any(not isinstance(r, dict) for r in records): raise ValueError("Unexpected record count")
+                    return records, bool(data.get("messages")) or len(records) == 50
 
                 def collect(records, days):
                     seen, fingerprints, accepted = set(), set(), []
@@ -256,7 +316,7 @@ class PriceResearch:
                 if not value["references"]:
                     # This pool includes unlinked sales; provider catalog linkage is never a prerequisite.
                     value["stages"].append("title_search_1y")
-                    query = f"{a['year']} {a['setName']} {a['player']} {a['cardNumber']}"
+                    query = f"{a['year']} {catalog_release(a)} {a['player']} {a['cardNumber']}"
                     if variant: query += " " + variant["name"]
                     if tier: query += f" /{tier}"
                     query = query[:300]
@@ -271,8 +331,12 @@ class PriceResearch:
                     if not value["references"]:
                         value["references"] = collect(records, 365); value["periodDays"] = 365
                 value["references"].sort(key=lambda r: r["saleDate"], reverse=True)
+                value["sampleLimited"] = value["sampleLimited"] or len(value["references"]) > 25
+                value["references"] = value["references"][:25]
                 value["status"] = "ready" if value["references"] else "no_match"
                 if not value["references"]: value["reason"] = "no_exact_sales" if value["candidateCount"] else "no_sales"
+            except PricingPending:
+                raise  # Resume this card after its shared bulk response arrives.
             except NoExactMatch as error:
                 value["reason"] = str(error)
             except MarketError as error:
@@ -294,14 +358,20 @@ class PriceResearch:
         if self.needs_guide(a, value):
             value["guideVersion"] = raw_guides.VERSION
             try:
-                guide = raw_guides.fetch_guide(a, value["checkedAt"], value["expiresAt"])
+                key = identity_key(a)
+                if self.batch_guides is not None and key in self.batch_guides:
+                    guide = self.batch_guides[key]
+                else:
+                    guide = raw_guides.fetch_guide(a, value["checkedAt"], value["expiresAt"])
+                    if self.batch_guides is not None: self.batch_guides[key] = guide
                 if guide:
                     value["soldStatus"] = value["status"]
                     value["references"] = [guide]; value["status"] = "ready"
             except Exception:
                 # The same TTL cools down failures. Never replace the sold result,
                 # retry paid services, infer a price, or widen the identity.
-                pass
+                if self.batch_guides is not None:
+                    self.batch_guides[identity_key(a)] = None
         if save: atomic(self.cache / (identity_key(a) + ".json"), value)
         return value
 

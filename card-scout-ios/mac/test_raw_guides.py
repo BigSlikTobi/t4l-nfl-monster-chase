@@ -18,6 +18,55 @@ HTML = '''<h1>2025 Donruss Optic Isiah Pacheco #147</h1><table>
 
 
 class RawGuideTests(unittest.TestCase):
+    def test_flagship_both_spellings_use_exact_free_guide_at_cardsight_cap(self):
+        import datetime as dt
+        import json
+        import time
+        from cardsight import MONTHLY_CAP
+        date = dt.date.today().isoformat()
+        row = dict(game="football", name="Justin Jefferson #131",
+                   set="Football Cards 2026 Topps Flagship", url="/prices/pricecharting-14124632")
+        text = f"# Justin Jefferson #131 — Football Cards 2026 Topps Flagship\n- Last price capture: {date}\n## Raw (ungraded) prices\n- Ungraded: $1.50\nPrices are USD.\n"
+        for name in ("Topps Flagship", "Topps Flagship Football"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as folder:
+                a = result()["analysis"]
+                a.update(player="Justin Jefferson", year=2026, brand="Topps", setName=name,
+                         subset="Base", cardNumber="131", parallel=None, serialNumber=None,
+                         identityConfirmed=True, confidence="high")
+                original = deepcopy(a)
+                client = Client(folder, lambda *args: self.fail("Must not spend CardSight quota"))
+                ledger = client.ledger(); ledger["calls"] = MONTHLY_CAP
+                atomic(client.ledger_path, ledger)
+                prices = PriceResearch(folder, client)
+                try:
+                    self.assertTrue(raw_guides.can_lookup(a))
+                    with patch("raw_guides.public_get", side_effect=[json.dumps({"cards": [row]}), text]) as get:
+                        v = prices.lookup(a)
+                        self.assertEqual((v["status"], v["references"][0]["lowCents"]), ("ready", 150))
+                        self.assertEqual(v["references"][0]["kind"], "guide")
+                        prices.lookup(a)
+                        self.assertEqual(get.call_count, 2)
+                    for wrong in ("2025 Topps Flagship", "2026 Topps Chrome", "2026 Topps Flagship Chrome"):
+                        self.assertIsNone(raw_guides.parse_midpoint(text.replace("2026 Topps Flagship", wrong), a))
+                    self.assertIsNone(raw_guides.parse_midpoint(text.replace("Jefferson #131", "Jefferson [Gold] #131"), a))
+                    self.assertEqual(a, original)
+                    self.assertEqual(client.ledger()["calls"], MONTHLY_CAP)
+                finally: prices.executor.shutdown()
+
+    def test_flagship_release_page_fallback_requires_exact_detail(self):
+        import datetime as dt
+        date = dt.date.today().isoformat()
+        a = dict(PACHECO, player="Justin Jefferson", year=2026, brand="Topps",
+                 setName="Topps Flagship", cardNumber="131")
+        text = f"# Justin Jefferson #131 — Football Cards 2026 Topps Flagship\n- Last price capture: {date}\n## Raw (ungraded) prices\n- Ungraded: $1.50\nPrices are USD.\n"
+        raw_guides._release_links.clear()
+        with patch("raw_guides.public_get", side_effect=['{"cards":[]}',
+                   '<a href="/prices/pricecharting-14124632">Justin Jefferson #131</a>', text]) as get:
+            value = raw_guides.midpoint(a, date, 1234)
+            self.assertEqual(value["lowCents"], 150)
+            self.assertEqual(get.call_args_list[1].args[0], "https://www.cardcenteringtool.com/sets/football/2026-topps-flagship")
+        raw_guides._release_links.clear()
+
     def test_uncached_estimate_does_not_spend_auction_quota(self):
         with tempfile.TemporaryDirectory() as folder:
             a = result()["analysis"]; a.update(PACHECO, identityConfirmed=True, confidence="high")

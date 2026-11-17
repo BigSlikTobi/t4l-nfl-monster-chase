@@ -98,7 +98,7 @@ def main():
             temporary.chmod(0o600); temporary.replace(chase_path)
         # Copy executable code out of iCloud/Documents so a background agent can read it reliably.
         installed = root / "service"; installed.mkdir(exist_ok=True)
-        for filename in ("server.py", "scan_matches.py", "reference_images.py", "catalog_supplement.py", "analysis.py", "api_client.py", "retrieval.py", "card_prices.py", "raw_guides.py", "retrieve_page.cjs", "schema.py", "chases.py", "cardsight.py", "cardsight_pilot.py"):
+        for filename in ("dev.py", "server.py", "scan_matches.py", "reference_images.py", "catalog_supplement.py", "analysis.py", "api_client.py", "retrieval.py", "card_prices.py", "card_lookup.py", "listing_decisions.py", "identity_decisions.py", "card_price_batch.py", "raw_guides.py", "retrieve_page.cjs", "schema.py", "chases.py", "cardsight.py", "cardsight_pilot.py"):
             shutil.copy2(source / filename, installed / filename)
         plist = Path.home() / "Library/LaunchAgents/com.tobiaslatta.cardscout.plist"
         plist.parent.mkdir(parents=True, exist_ok=True)

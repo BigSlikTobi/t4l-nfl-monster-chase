@@ -99,6 +99,26 @@ final class BatchReanalysisTests: XCTestCase {
         XCTAssertEqual(repeated.cards, updated.cards)
         XCTAssertEqual(try disk.load().savedPhotoReanalysisOperationID, operation)
     }
+    func testFreshPriceRunClearsOldPricesAndKeepsManualIdentity() throws {
+        var library = Library()
+        library.cards = [card(confirmed: true)]
+        library.cards[0].manualAssignment = true
+        library.cards[0].analysis?.cardNumber = "123"
+        library.cards[0].analysis?.marketLowCents = 350
+        library.cards[0].analysis?.unpricedBaseExpiresAt = Date().addingTimeInterval(1000).timeIntervalSince1970
+        try library.setPersonalPrice(cardID: library.cards[0].id, amountCents: 999, currency: "EUR")
+        let operation = UUID().uuidString
+        let next = try disk.reanalyzeAllSaved(operationID: operation, in: library, clearCurrentPrices: true)
+        let saved = try XCTUnwrap(next.cards.first)
+        XCTAssertNil(saved.analysis?.marketLowCents)
+        XCTAssertNil(saved.analysis?.unpricedBaseExpiresAt)
+        XCTAssertNil(saved.personalPrice)
+        XCTAssertNil(saved.refreshOfJobID)
+        XCTAssertFalse(saved.hasDisplayableAnalysis)
+        XCTAssertEqual(saved.analysis?.cardNumber, "123")
+        XCTAssertEqual(saved.manualAssignment, true)
+        XCTAssertEqual(try disk.reanalyzeAllSaved(operationID: operation, in: next, clearCurrentPrices: true).cards, next.cards)
+    }
     func testAllSavedPassIsAtomicWhenAPhotoIsMissing() throws {
         var library = Library(); library.cards = [card(), card()]
         library.cards[1].frontFile = "missing.jpg"
