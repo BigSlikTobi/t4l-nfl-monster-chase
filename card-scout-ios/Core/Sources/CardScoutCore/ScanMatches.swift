@@ -54,11 +54,25 @@ extension Library {
     /// Local fallback and manual search work even without the worker or Decisions.
     /// Only actual checklist rows are offered; parallel membership is never invented.
     public func matches(for card: OwnedCard, query: String = "", limit: Int = 5) -> [CardMatch] {
+        rankedMatches(for: card, query: query, limit: limit, readings: [:])
+    }
+
+    public func reviewMatches(for card: OwnedCard, query: String = "") -> [CardMatch] {
+        rankedMatches(for: card, query: query, limit: 10, readings: card.printedReadings ?? [:])
+    }
+
+    private func rankedMatches(for card: OwnedCard, query: String, limit: Int, readings: [String: String]) -> [CardMatch] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let printedNumber = readings["number"]
+        let printedPlayer = matchText(readings["player"])
+        let printedYear = readings["year"].flatMap(Int.init)
         let a = card.analysis
         var scored: [(CardMatch, Int)] = []
         for collection in collections {
+            if let printedYear, printedYear != collection.year { continue }
             for entry in collection.cards {
+                if let printedNumber, entry.number.caseInsensitiveCompare(printedNumber) != .orderedSame { continue }
+                if !printedPlayer.isEmpty && printedPlayer != matchText(entry.player) { continue }
                 let match = CardMatch(collectionID: collection.id, number: entry.number)
                 let text = "\(entry.player) \(entry.number) \(collection.year) \(collection.name) \(collection.subset) \(collection.parallel ?? "Base")"
                 if !query.isEmpty {
@@ -71,7 +85,7 @@ extension Library {
                 let suggested = card.matchSuggestions?.contains(match) == true
                 let ocr = " " + matchText(card.captureText) + " "
                 let ocrName = !matchText(entry.player).isEmpty && ocr.contains(" " + matchText(entry.player) + " ")
-                guard !query.isEmpty || name || number || suggested || ocrName else { continue }
+                guard !query.isEmpty || printedNumber != nil || !printedPlayer.isEmpty || name || number || suggested || ocrName else { continue }
                 var score = (name ? 30 : 0) + (number ? 20 : 0)
                 if a?.year == collection.year { score += 12 }
                 if matchText(a?.setName) == matchText(collection.name) { score += 16 }
@@ -98,7 +112,12 @@ extension Library {
             else { let created = CardFolder(name: name); updated.folders = (updated.folders ?? []) + [created]; folder = created.id }
         }
         if let folder, updated.folders?.contains(where: { $0.id == folder }) != true { throw StoreError.invalidResult }
-        if let match {
+        if let match, updated.cards[index].hasCurrentAnalysis,
+           let a = updated.cards[index].analysis, a.assessmentSource == "cardsight",
+           a.cardSightIdentity != nil, a.identityConfirmed == true,
+           a.collectionID == match.collectionID, a.cardNumber == match.number {
+            // Accept the identified card without uploading it for another assessment.
+        } else if let match {
             if updated.cards[index].analysis == nil {
                 updated.cards[index].analysis = CardAnalysis(recommendation: "Keep", marketCheckedAt: "", marketSources: [], confidence: "low", conditionNotes: "", rationale: "", needsReview: true)
             }
@@ -134,4 +153,52 @@ extension Library {
         }
         self = updated
     }
+}
+
+// A user choice gets its own job revision. The server accepts only variants from
+// its previous result for the same photos, and reuses the shared price snapshot.
+extension Library {
+    public mutating func selectCardSightVariant(cardID: String, variantID: String) throws {
+        guard let i = cards.firstIndex(where: { $0.id == cardID }), cards[i].hasCurrentAnalysis,
+              var a = cards[i].analysis, a.cardSightIdentity != nil,
+              a.cardSightVariants?.contains(where: { $0.id == variantID }) == true else { throw StoreError.invalidResult }
+        if a.identityConfirmed == true && (a.cardSightIdentity?.parallelID ?? "base") == variantID { return }
+        cards[i].refreshOfJobID = cards[i].jobID
+        cards[i].analysisJobID = UUID().uuidString.lowercased()
+        cards[i].requestedVariantID = variantID
+        cards[i].uploadedJobID = nil
+        cards[i].error = nil
+        cards[i].state = "queued"
+        cards[i].preservesPreviousAnalysis = true
+        a.insights?.marketReferences = []
+        a.marketSources = []; a.marketLowCents = nil; a.marketHighCents = nil; a.comparableEstimate = nil
+        a.unpricedBaseExpiresAt = nil
+        // Do not show the previous variant's value while the choice is applied.
+        cards[i].analysis = a
+    }
+
+    /// An HTTP rejection applies only to the still-pending revision.
+    @discardableResult
+    public mutating func rejectCardSightVariant(cardID: String, jobID: String, previousAnalysis: CardAnalysis?,
+                                                error: String) -> Bool {
+        guard let i = cards.firstIndex(where: { $0.id == cardID && $0.jobID == jobID }),
+              cards[i].requestedVariantID != nil, cards[i].preservesPreviousAnalysis == true,
+              let previous = cards[i].refreshOfJobID, previous != jobID, let saved = cards[i].analysis,
+              let identity = saved.cardSightIdentity else { return false }
+        if let prior = previousAnalysis, prior.cardSightIdentity == identity, prior.player == saved.player,
+           prior.year == saved.year, prior.brand == saved.brand, prior.setName == saved.setName,
+           prior.subset == saved.subset, prior.cardNumber == saved.cardNumber, prior.parallel == saved.parallel,
+           prior.serialNumber == saved.serialNumber {
+            cards[i].analysis = prior.currentPricing()
+        }
+        cards[i].analysisJobID = previous == cardID ? nil : previous
+        cards[i].uploadedJobID = previous
+        cards[i].refreshOfJobID = nil
+        cards[i].requestedVariantID = nil
+        cards[i].preservesPreviousAnalysis = false
+        cards[i].state = "analyzed"
+        cards[i].error = error
+        return true
+    }
+
 }

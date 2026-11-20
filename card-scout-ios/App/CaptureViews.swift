@@ -123,7 +123,10 @@ struct AddCardView: View {
     private func save() {
         guard canSave else { return }
         do {
-            if let cardID { try store.retakePhotos(cardID, front: front, back: back) }
+            if let cardID, existingCard?.awaitingBack == true, focusedSide == .back {
+                guard let back else { return }
+                try store.finishCapturePair(cardID, back: back)
+            } else if let cardID { try store.retakePhotos(cardID, front: front, back: back) }
             else if let front { matchCardID = try store.addCapture(CapturePhoto(front: front, back: back)); return }
             else { return }
             onSaved?()
@@ -202,75 +205,6 @@ struct AddCardView: View {
 
 func normalizedJPEG(_ data: Data) -> Data? {
     CardPhotoEncoding.jpeg(data)
-}
-
-struct ConnectionView: View {
-    @Environment(AppStore.self) private var store
-    @Environment(\.dismiss) private var dismiss
-    @AppStorage("scoutAppearance") private var appearance = ScoutAppearance.system.rawValue
-    @AppStorage("scoutLanguage") private var language = "system"
-    @State private var code = ""
-    @State private var scanning = false
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    HStack(spacing: 14) {
-                        Image(systemName: store.connected ? "checkmark.circle" : "laptopcomputer")
-                            .font(.title2).foregroundStyle(store.connected ? Color.scoutAccent : Color.scoutMuted)
-                            .frame(width: 48, height: 48).background(Color.scoutElevated, in: RoundedRectangle(cornerRadius: 14))
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(trDisplay(store.connected ? "Verbunden" : "Offline")).font(.headline)
-                            if let pairing = store.pairing {
-                                Text(trDisplay(URL(string: pairing.baseURL)?.host ?? "Mac")).font(.caption).foregroundStyle(Color.scoutMuted)
-                            } else {
-                                Text(tr("Noch kein Mac oder Server gekoppelt")).font(.caption).foregroundStyle(Color.scoutMuted)
-                            }
-                        }
-                    }.padding(.vertical, 6)
-                    Button { Task { await store.sync() } } label: {
-                        HStack {
-                            Label(tr("Verbindung prüfen"), systemImage: "arrow.clockwise")
-                            Spacer()
-                            if store.syncing { ProgressView() }
-                        }
-                    }.disabled(store.pairing == nil || store.syncing)
-                    if let message = store.connectionError {
-                        Label(trDisplay(message), systemImage: "exclamationmark.triangle")
-                            .font(.footnote).foregroundStyle(Color.scoutAccent)
-                            .accessibilityLabel(trDisplay("Verbindungsfehler: " + message))
-                    }
-                }
-                if let candidate = store.pairingCandidate {
-                    Section(tr("Diese Verbindung verwenden?")) {
-                        Text(trDisplay(URL(string: candidate.baseURL)?.host ?? "Mac"))
-                        Button(tr("Verbinden")) { store.confirmPairing() }.fontWeight(.semibold)
-                        Button(tr("Abbrechen"), role: .cancel) { store.pairingCandidate = nil }
-                    }
-                } else {
-                    Section(tr("Mac oder Server verbinden")) {
-                        if UIImagePickerController.isSourceTypeAvailable(.camera) { Button(tr("Verbindungscode scannen")) { scanning = true } }
-                        TextField(tr("Verbindungslink einfügen"), text: $code, axis: .vertical).textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive()
-                        Button(tr("Code öffnen")) { if let url = URL(string: code) { store.receivePairing(url); code = "" } }.disabled(code.isEmpty)
-                    }
-                }
-                Section {
-                    Picker(tr("Sprache"), selection: $language) {
-                        Text(tr("Wie iPhone")).tag("system")
-                        Text("Deutsch").tag("de")
-                        Text("English").tag("en")
-                    }.pickerStyle(.menu)
-                }
-                Section(tr("Darstellung")) {
-                    Picker(tr("Design"), selection: $appearance) {
-                        ForEach(ScoutAppearance.allCases) { mode in Text(trDisplay(mode.title)).tag(mode.rawValue) }
-                    }.pickerStyle(.segmented)
-                }
-            }.scrollContentBackground(.hidden).background(Color.scoutCanvas)
-                .navigationTitle(tr("Einstellungen")).navigationBarTitleDisplayMode(.inline).toolbar { ToolbarItem(placement: .confirmationAction) { Button(tr("Fertig")) { dismiss() } } }
-                .sheet(isPresented: $scanning) { QRScanner { value in scanning = false; if let url = URL(string: value) { store.receivePairing(url) } } }
-        }
-    }
 }
 
 struct QRScanner: UIViewControllerRepresentable {

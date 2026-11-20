@@ -30,8 +30,14 @@ def audit_image_sources(root):
             # AppStore validates imported evidence; it does not decode for display.
             if path.name == 'AppStore.swift':
                 source = '\n'.join(line for line in source.splitlines() if 'Data(base64Encoded:' not in line)
+            # Pack Studio reads a JSON take manifest here; video frames come from AVFoundation.
+            if path.name == 'PackStudioMedia.swift':
+                source = source.replace('Data(contentsOf: manifest)', '', 1)
             if re.search(display_decode, source):
                 violations.append(f'{path.name}: display decoding bypasses ImagePipeline')
+            # The ECB client fetches exchange rates. Its one XML request is unrelated to photos.
+            if path.name == 'EuroReferenceRate.swift':
+                source = source.replace('URLSession.shared.data(for: request)', '', 1)
             if path.name != 'AppStore.swift' and re.search(r'URLSession|NSCache|URLCache', source):
                 violations.append(f'{path.name}: independent image network/cache implementation')
     if violations:

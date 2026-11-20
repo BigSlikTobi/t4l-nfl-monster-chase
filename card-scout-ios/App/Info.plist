@@ -4,6 +4,10 @@
 <dict>
 	<key>CFBundleDisplayName</key>
 	<string>Burn Count</string>
+	<key>UIAppFonts</key>
+	<array>
+		<string>T4LEndZone-BlackItalic.ttf</string>
+	</array>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -14,7 +18,9 @@
 		</dict>
 	</array>
 	<key>NSCameraUsageDescription</key>
-	<string>Karten fotografieren und deinen Mac verbinden.</string>
+	<string>Karten fotografieren, Packs filmen und deinen Mac verbinden.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Ton für deine Pack-Videos aufnehmen.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Dein Mac analysiert deine Karten über eine verschlüsselte Verbindung.</string>
 	<key>NSAppTransportSecurity</key>

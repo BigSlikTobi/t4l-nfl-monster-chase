@@ -61,6 +61,46 @@ class CardPriceTests(unittest.TestCase):
         return 200, {"results": [{"card_id": "fixture", "success": True, "data": {"query": {"parallel_id": None, "grade_id": None,
              "period": body["period"], "listing_type": "auction"}, "card": {"card_id": "fixture", "set": {"set_id": "base"}}, "raw": {"records": self.records}}}]}
 
+    def test_flagship_alias_prices_exact_sales_without_changing_owned_identity(self):
+        self.analysis.update(year=2026, setName="Topps Flagship")
+        self.card.update(releaseYear="2026", releaseName="Topps Flagship Football")
+        self.records = [dict(self.sale, title="2026 Topps Flagship Football Terrance Ferguson Rookie #335")]
+        original = deepcopy(self.analysis)
+        requests = []
+        transport = self.client.transport
+        def capture(method, path, params, body):
+            if path == "/v1/catalog/cards": requests.append(params)
+            return transport(method, path, params, body)
+        self.client.transport = capture
+        self.assertTrue(eligible(self.analysis))
+        value = self.prices.lookup(self.analysis)
+        self.assertEqual(value["status"], "ready")
+        self.assertEqual(value["references"][0]["matchQuality"], "exact")
+        self.assertEqual(requests[0]["releaseName"], "Topps Flagship Football")
+        self.assertEqual(self.analysis, original)
+        self.assertEqual(value["key"], identity_key(original))
+        self.assertIsNotNone(self.prices.cached(original))
+        attached = self.prices.attach({"analysis": original})
+        self.assertTrue(attached["analysis"]["insights"]["marketReferences"])
+
+    def test_flagship_alias_does_not_accept_neighboring_release_or_wrong_sale(self):
+        self.analysis.update(year=2026, setName="Topps Flagship")
+        self.card.update(releaseYear="2026", releaseName="Topps Chrome")
+        self.assertEqual(self.prices.lookup(self.analysis)["reason"], "catalog_not_exact")
+        self.analysis["cardNumber"] = "336"
+        self.card.update(number="336", releaseName="Topps Flagship Football")
+        self.records = [dict(self.sale, title="2026 Topps Chrome Terrance Ferguson Rookie #336")]
+        self.assertEqual(self.prices.lookup(self.analysis)["references"], [])
+
+    def test_flagship_alias_is_scoped_to_verified_product(self):
+        self.analysis.update(year=2026, setName="Topps Flagship")
+        for changes in ({"year": 2025}, {"brand": "Panini"},
+                        {"setName": "Topps Flagship Chrome"}, {"setName": "Topps Flagsip"},
+                        {"parallel": "unknown"}, {"identityConfirmed": False}):
+            with self.subTest(changes=changes):
+                self.assertFalse(eligible(dict(self.analysis, **changes)))
+        self.assertTrue(eligible(dict(self.analysis, setName="Topps Flagship Football")))
+
     def test_prices_are_attributed_cached_and_expire_without_changing_identity(self):
         value = self.prices.lookup(self.analysis)
         self.assertEqual(value["status"], "ready")
@@ -164,7 +204,7 @@ class CardPriceTests(unittest.TestCase):
         atomic(self.client.ledger_path, ledger)
         self.client.request("GET", "/v1/catalog/cards")
         self.assertEqual(self.client.ledger()["calls"], 301)
-        ledger = self.client.ledger(); ledger["calls"] = 720
+        ledger = self.client.ledger(); ledger["calls"] = MONTHLY_CAP
         atomic(self.client.ledger_path, ledger)
         with self.assertRaises(RuntimeError): self.client.request("GET", "/v1/catalog/cards")
 
@@ -373,8 +413,8 @@ class CardPriceTests(unittest.TestCase):
         self.assertEqual(self.prices.metadata("release"), (names, variants))
         self.assertEqual(len(calls), 5)
 
-    def test_multiple_clients_cannot_overspend_last_free_request(self):
-        self.assertEqual(MONTHLY_CAP, 720)
+    def test_multiple_clients_cannot_overspend_last_pro_request(self):
+        self.assertEqual(MONTHLY_CAP, 5000)
         ledger = self.client.ledger(); ledger["calls"] = MONTHLY_CAP - 1
         atomic(self.client.ledger_path, ledger)
         clients = [Client(self.root, self.transport), Client(self.root, self.transport)]

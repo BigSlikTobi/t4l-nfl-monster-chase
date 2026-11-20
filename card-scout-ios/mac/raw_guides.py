@@ -14,10 +14,20 @@ import urllib.request
 PACHECO = dict(player="Isiah Pacheco", year=2025, brand="Panini", setName="Donruss Optic",
                subset="Base", cardNumber="147", parallel=None, serialNumber=None)
 PACHECO_URL = "https://slabline.ai/cards/2025-donruss-optic-football-isiah-pacheco-147-psa-10"
-VERSION = 3
+VERSION = 4
 _blocked_until = {}
 _release_links = {}
-MIDPOINT_RELEASES = {("Topps Chrome", 2025, "Base"): "/sets/football/2025-topps-chrome"}
+MIDPOINT_RELEASES = {
+    ("Topps Chrome", 2025, "Base"): "/sets/football/2025-topps-chrome",
+    ("Topps Flagship Football", 2026, "Base"): "/sets/football/2026-topps-flagship",
+}
+
+
+def catalog_release(a):
+    name = a.get("setName")
+    if a.get("year") == 2026 and a.get("brand") == "Topps" and name == "Topps Flagship":
+        return "Topps Flagship Football"
+    return name
 
 
 def supported(a):
@@ -25,7 +35,7 @@ def supported(a):
 
 
 def can_lookup(a):
-    return (a.get("setName") in ("Donruss Optic", "Select", "Prizm", "Topps Chrome", "Topps Flagship Football")
+    return (catalog_release(a) in ("Donruss Optic", "Select", "Prizm", "Topps Chrome", "Topps Flagship Football")
             and a.get("brand") == ("Panini" if a["setName"] in ("Donruss Optic", "Select", "Prizm") else "Topps")
             and type(a.get("year")) is int and 1980 <= a["year"] <= dt.date.today().year
             and all(isinstance(a.get(k), str) and a[k] for k in ("player", "subset", "cardNumber"))
@@ -62,9 +72,11 @@ def exact_name(name, a):
 
 def release_names(a):
     # Explicit spelling aliases for the same release, never Sapphire/Black/college.
-    product = a["setName"]
+    product = catalog_release(a)
     bases = ([f"Panini {product}", product + " Football", product]
              if a.get("brand") == "Panini" else [product, product + " Football"])
+    if product == "Topps Flagship Football" and a.get("brand") == "Topps" and a["year"] == 2026:
+        bases = ["Topps Flagship", "Topps Flagship Football"]
     suffix = "" if a["subset"] == "Base" else " " + a["subset"]
     return {normalized(str(a["year"]) + " " + p + suffix) for p in bases}
 
@@ -179,7 +191,7 @@ def midpoint(a, checked_at, expires_at):
     # The public search returns only ten candidates. A published exact-release
     # page can expose an exact card that was crowded out. Retain links in memory
     # briefly; never persist the page, unrelated prices or a provider catalog.
-    path = MIDPOINT_RELEASES.get((a["setName"], a["year"], a["subset"]))
+    path = MIDPOINT_RELEASES.get((catalog_release(a), a["year"], a["subset"]))
     if path:
         cached = _release_links.get(path)
         if not cached or cached[0] <= time.monotonic():

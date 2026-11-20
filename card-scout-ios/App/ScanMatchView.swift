@@ -28,9 +28,11 @@ struct ScanMatchView: View {
                         Text(tr("Nimm unter Scannen die Rückseite derselben Karte auf. Danach startet die Treffersuche."))
                         Button(tr("Fotopaar fortsetzen")) { store.selectedTab = 3; dismiss() }
                             .buttonStyle(ScoutPrimaryButtonStyle())
+                    } else if card.automaticScan == true && card.isAwaitingAnalysis {
+                        HStack { ProgressView(); Text(tr("Analyse läuft")) }
                     } else if saved || card.isScanDraft != true {
                         Label(tr("In deiner Sammlung"), systemImage: "checkmark.circle.fill").font(.title2.bold()).foregroundStyle(Color.scoutAccent)
-                        Text(tr("Analyse läuft")).foregroundStyle(Color.scoutMuted)
+                        if card.isAwaitingAnalysis { Text(tr("Analyse läuft")).foregroundStyle(Color.scoutMuted) }
                         NavigationLink("Karte ansehen") { CardDetailView(cardID: cardID) }
                         Button(tr("Nächste Karte scannen")) { store.selectedTab = 3; if let onNext { onNext() } else { dismiss() } }.buttonStyle(ScoutPrimaryButtonStyle())
                     } else {
@@ -53,6 +55,7 @@ struct ScanMatchView: View {
                         } else if ["unavailable", "catalog"].contains(card.matchNotice ?? "") {
                             Text(tr("Vorschläge aus der Checkliste · ohne zusätzlichen Bildabgleich")).font(.caption).foregroundStyle(Color.scoutMuted)
                         }
+                        if card.automaticScan != true { CardVariantPicker(card: card) }
                         TextField(tr("Spieler, Nummer oder Set suchen"), text: $query)
                             .textFieldStyle(.roundedBorder).autocorrectionDisabled()
                         let matches = store.library.matches(for: card, query: query, limit: query.isEmpty ? 5 : 60)
@@ -108,18 +111,32 @@ struct ScanMatchView: View {
                             if store.collectScan(cardID, match: selection, folderID: folderID == "new" || folderID.isEmpty ? nil : folderID,
                                                  newFolderName: folderID == "new" ? newFolder : nil) { saved = true }
                         }.buttonStyle(ScoutPrimaryButtonStyle())
-                            .disabled((selection == nil && !noneFits) || (folderID == "new" && newFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                            .disabled(card.requestedVariantID != nil || (selection == nil && !noneFits) || (folderID == "new" && newFolder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
 
                     }
                 }.padding(20)
             }
         }.background(Color.scoutCanvas).navigationTitle(tr("Treffer vergleichen")).navigationBarTitleDisplayMode(.inline)
             .toolbar(.hidden, for: .tabBar)
+            .toolbar {
+                if let card, card.isScanDraft == true {
+                    ToolbarItem(placement: .topBarTrailing) { CardRemovalButton(card: card) { dismiss() } }
+                }
+            }
             .task {
                 folderID = store.library.lastUsedFolderID ?? ""
                 while !Task.isCancelled && !saved && card?.isScanDraft == true && card?.awaitingBack != true {
                     await store.sync()
                     do { try await Task.sleep(for: .seconds(2)) } catch { break }
+                }
+            }
+            .onChange(of: card?.analysis?.collectionID, initial: true) { _, collectionID in
+                if !noneFits, selection == nil, let collectionID, card?.analysis?.identityConfirmed == true,
+                   let number = card?.analysis?.cardNumber { selection = CardMatch(collectionID: collectionID, number: number) }
+            }
+            .onChange(of: card?.state) { _, state in
+                if state == "analyzed", let a = card?.analysis, a.identityConfirmed == true, let collectionID = a.collectionID, let number = a.cardNumber {
+                    selection = CardMatch(collectionID: collectionID, number: number); noneFits = false
                 }
             }
             .onChange(of: card?.jobID) { _, _ in selection = nil; noneFits = false }
@@ -173,5 +190,29 @@ struct ScanDraftsView: View {
                 HStack { OwnedPhoto(name: card.frontFile, number: "").frame(width: 48, height: 68); Text(cardTitle(card)) }
             }
         }.navigationTitle(tr("Scans vergleichen"))
+    }
+}
+
+struct FinishFollowUp: View {
+    @Environment(AppStore.self) private var store
+    let card: OwnedCard
+    @State private var angleJob: String?
+    var body: some View {
+        if card.canCaptureFinishAngle {
+            Button { angleJob = card.jobID } label: {
+                Label(card.canAddTilt ? tr("Tilt the card slightly") : tr("Add angled photo"), systemImage: "camera")
+            }.buttonStyle(ScoutPrimaryButtonStyle())
+            .sheet(isPresented: Binding(get: { angleJob != nil }, set: { if !$0 { angleJob = nil } })) {
+                PortraitCameraView(tilted: true) { data in
+                    if let data, let revision = angleJob { store.addTilt(data, cardID: card.id, jobID: revision) }
+                    angleJob = nil
+                }
+            }
+        } else if let match = card.proposedPhotoMatch, match.identityConfirmed == true {
+            let name = (match.parallel ?? match.subset) ?? "Base"
+            Button { store.acceptPhotoMatch(card.id, jobID: card.jobID) } label: {
+                HStack { Text(tr("Use photo match")); Text(verbatim: name) }
+            }.buttonStyle(ScoutSecondaryButtonStyle())
+        }
     }
 }

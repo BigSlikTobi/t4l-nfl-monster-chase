@@ -10,6 +10,35 @@ public struct MarketSource: Codable, Hashable, Sendable {
     public var saleDate: String?
 }
 
+public struct CardSightVariant: Codable, Hashable, Identifiable, Sendable {
+    public var id: String
+    public var name: String
+    public var confidence: String?
+    public var numberedTo: Int?
+    /// Median of completed sales only. Asking prices never contribute.
+    public var medianCents: Int?
+    public var askingMedianCents: Int? = nil
+    public var soldCount: Int? = nil
+    public var askingCount: Int? = nil
+    public var askingCurrency: String? = nil
+    public var soldShipping: String? = nil
+    public var askingShipping: String? = nil
+    public var currency: String?
+    public var expiresAt: Double?
+    public var scoutValue: CardScoutValue? = nil
+}
+
+public struct CardSightIdentity: Codable, Hashable, Sendable {
+    public var cardID: String
+    public var setID: String
+    public var parallelID: String?
+    public var slabbed: Bool
+    public var variationOf: String?
+    public init(cardID: String, setID: String, parallelID: String? = nil, slabbed: Bool = false) {
+        self.cardID = cardID; self.setID = setID; self.parallelID = parallelID; self.slabbed = slabbed
+    }
+}
+
 public struct CardAnalysis: Codable, Hashable, Sendable {
     public var player: String?
     public var year: Int?
@@ -39,6 +68,13 @@ public struct CardAnalysis: Codable, Hashable, Sendable {
     public var currency: String?
     public var insights: CardInsights?
     public var comparableEstimate: ComparableEstimate? = nil
+    /// Expiry of the worker's completed empty lookup for a verified ordinary base card.
+    public var unpricedBaseExpiresAt: Double? = nil
+    public var finishState: String?
+    public var finishPolicy: String?
+    public var assessmentSource: String? = nil
+    public var cardSightIdentity: CardSightIdentity? = nil
+    public var cardSightVariants: [CardSightVariant]? = nil
 
     public var marketLabel: String {
         guard let low = marketLowCents, let high = marketHighCents else { return "Wert offen" }
@@ -67,12 +103,22 @@ public struct OwnedCard: Codable, Identifiable, Hashable, Sendable {
     public var isFavorite: Bool?
     public var storageLocation: String?
     public var notes: String?
+    public var personalPrice: PersonalCardPrice?
     public var manualAssignment: Bool?
+    public var requestedVariantID: String?
+    public var automaticScan: Bool?
+    public var tiltFile: String?
+    public var photoRecheck: Bool?
+    public var userSelectedEdition: Bool?
+    public var proposedPhotoMatch: CardAnalysis?
+    public var previousPhotoAssignment: CardAnalysis?
     public var uploadedJobID: String?
     public var scanSelection: ScanSelection?
     public var isScanDraft: Bool?
     public var awaitingBack: Bool?
     public var matchNotice: String?
+    public var printedReadings: [String: String]?
+    public var declinedReviewJobID: String?
     public var matchSuggestions: [CardMatch]?
     public var hasProvisionalAnalysis: Bool?
     public init(id: String = UUID().uuidString.lowercased(), createdAt: String = ISO8601DateFormatter().string(from: Date()), state: String = "queued", frontFile: String = "", backFile: String? = nil, analysis: CardAnalysis? = nil, error: String? = nil) {
@@ -80,6 +126,9 @@ public struct OwnedCard: Codable, Identifiable, Hashable, Sendable {
     }
     public var title: String { analysis?.player ?? (analysis == nil ? "Neue Karte" : "Spieler nicht erkannt") }
     public var jobID: String { analysisJobID ?? id }
+    public var canAddTilt: Bool {
+        hasCurrentAnalysis && analysis?.identityConfirmed != true && (analysis?.finishState == "tilt" || proposedPhotoMatch?.finishState == "tilt") && tiltFile == nil
+    }
     public var hasCurrentAnalysis: Bool { state == "analyzed" && analysis != nil }
     public var hasDisplayableAnalysis: Bool { analysis != nil && (hasCurrentAnalysis || preservesPreviousAnalysis == true || hasProvisionalAnalysis == true) }
     public var isAwaitingAnalysis: Bool { ["queued", "processing", "identified", "enriching"].contains(state) }
@@ -116,7 +165,7 @@ public struct CardCollection: Codable, Identifiable, Hashable, Sendable {
         self.id = id; self.name = name; self.year = year; self.brand = brand; self.subset = subset; self.parallel = parallel; self.expectedCount = expectedCount; self.checklistComplete = checklistComplete; self.sourceURL = sourceURL; self.checkedAt = checkedAt; self.cards = cards
     }
     public func owned(for number: String, in inventory: [OwnedCard]) -> [OwnedCard] {
-        inventory.filter { $0.isScanDraft != true && $0.analysis?.collectionID == id && $0.analysis?.cardNumber == number && $0.analysis?.identityConfirmed == true }
+        inventory.filter { $0.ownedChecklistID == id && $0.analysis?.cardNumber == number }
     }
     public func ownedCount(in inventory: [OwnedCard]) -> Int {
         cards.filter { !owned(for: $0.number, in: inventory).isEmpty }.count
@@ -153,6 +202,7 @@ public struct HotCard: Codable, Identifiable, Hashable, Sendable {
 public struct Library: Codable, Sendable {
     public var version: Int = 1
     public var cards: [OwnedCard] = []
+    public var removedCards: [OwnedCard]?
     public var collections: [CardCollection] = []
     public var hunts: [HuntCard] = []
     public var hotCards: [HotCard] = []
@@ -177,42 +227,77 @@ public struct Library: Codable, Sendable {
     public mutating func applyJobResult(cardID: String, jobID: String, status: String, analysis: CardAnalysis?, collection: CardCollection?, error: String?) throws -> Bool {
         guard let index = cards.firstIndex(where: { $0.id == cardID }), cards[index].jobID == jobID else { return false }
         guard ["queued", "processing", "identified", "enriching", "analyzed", "failed"].contains(status), !["identified", "enriching", "analyzed"].contains(status) || analysis != nil else { throw StoreError.invalidResult }
-        if cards[index].manualAssignment == true, let locked = cards[index].analysis, let incoming = analysis,
+        if let selected = cards[index].requestedVariantID, status == "analyzed" {
+            guard let original = cards[index].analysis?.cardSightIdentity, let fresh = analysis?.cardSightIdentity,
+                  fresh.cardID == original.cardID, fresh.setID == original.setID,
+                  (fresh.parallelID ?? "base") == selected, analysis?.identityConfirmed == true else { return false }
+        }
+        if cards[index].photoRecheck != true, cards[index].manualAssignment == true, cards[index].requestedVariantID == nil, let locked = cards[index].analysis, let incoming = analysis,
            ["identified", "enriching", "analyzed"].contains(status) {
             guard incoming.collectionID == locked.collectionID, incoming.cardNumber == locked.cardNumber,
                   incoming.player == locked.player, incoming.year == locked.year,
                   incoming.brand == locked.brand, incoming.setName == locked.setName,
                   incoming.subset == locked.subset, incoming.parallel == locked.parallel else { return false }
         }
-        var mergedCollection = collection
-        if let incoming = collection, let existing = collections.first(where: { $0.id == incoming.id }) {
-            if existing.checklistComplete && !incoming.checklistComplete { mergedCollection = existing }
-            else if !incoming.checklistComplete {
-                var merged = incoming
-                for entry in existing.cards {
-                    if let i = merged.cards.firstIndex(where: { $0.number == entry.number }) {
-                        guard merged.cards[i].player.caseInsensitiveCompare(entry.player) == .orderedSame else { throw StoreError.invalidResult }
-                        if merged.cards[i].imageURL == nil { merged.cards[i].imageURL = entry.imageURL }
-                    } else { merged.cards.append(entry) }
-                }
-                mergedCollection = merged
-            }
+        let mergedCollection = try collection.map { incoming in
+            try collections.first(where: { $0.id == incoming.id })?.merging(incoming) ?? incoming
         }
-        if var incoming = mergedCollection, let existing = collections.first(where: { $0.id == incoming.id }) {
-            if incoming.referenceExample == nil { incoming.referenceExample = existing.validReferenceExample }
-            for entryIndex in incoming.cards.indices where incoming.cards[entryIndex].referenceImage == nil {
-                if let entry = existing.cards.first(where: { $0.number == incoming.cards[entryIndex].number }),
-                   let reference = entry.exactReference(in: incoming), reference.player == incoming.cards[entryIndex].player {
-                    incoming.cards[entryIndex].referenceImage = reference
-                }
-            }
-            mergedCollection = incoming
-        }
+        let previousOpenMatch = cards[index].openFinishIdentity
         cards[index].state = status; cards[index].error = error
         if ["identified", "enriching", "analyzed"].contains(status), let analysis {
-            cards[index].analysis = analysis
+            let protectChoice = cards[index].manualAssignment == true || cards[index].userSelectedEdition == true || cards[index].scanSelection?.match != nil
+            if cards[index].photoRecheck == true, protectChoice,
+               var saved = cards[index].analysis, let savedID = saved.collectionID,
+               savedID != analysis.collectionID || saved.cardNumber != analysis.cardNumber || saved.parallel != analysis.parallel {
+                // Keep the prior assignment and its evidence when a requested photo recheck changes the edition.
+                if cards[index].previousPhotoAssignment == nil { cards[index].previousPhotoAssignment = saved }
+                if status == "analyzed", analysis.identityConfirmed == true, analysis.finishState == "verified" {
+                    cards[index].analysis = analysis
+                    cards[index].manualAssignment = false
+                    cards[index].userSelectedEdition = false
+                    cards[index].proposedPhotoMatch = nil
+                } else {
+                    saved.clearAssessmentAfterCorrection()
+                    saved.identityConfirmed = false
+                    saved.finishState = "savedChoice"
+                    saved.finishPolicy = analysis.finishPolicy
+                    cards[index].proposedPhotoMatch = status == "analyzed" ? analysis : nil
+                    cards[index].analysis = saved
+                }
+            } else if cards[index].photoRecheck == true, analysis.identityConfirmed != true,
+                      analysis.cardSightIdentity == nil, let previousOpenMatch {
+                // An inconclusive angle adds evidence without erasing the known binder location.
+                cards[index].analysis = previousOpenMatch
+                cards[index].proposedPhotoMatch = nil
+            } else {
+                cards[index].analysis = analysis
+                cards[index].proposedPhotoMatch = nil
+            }
+            let readings = cards[index].printedReadings ?? [:]
+            if readings.contains(where: { key, value in
+                PrintedField(rawValue: key).map { cards[index].conflictsWithReading($0, value: value) } ?? false
+            }) {
+                var uncertain = analysis
+                uncertain.clearAssessmentAfterCorrection()
+                uncertain.collectionID = nil
+                uncertain.identityConfirmed = false
+                uncertain.uncertainties = (analysis.uncertainties ?? []) + ["Printed details differ from the suggested checklist entry."]
+                cards[index].analysis = uncertain
+            }
             cards[index].hasProvisionalAnalysis = status != "analyzed"
-            if status == "analyzed" { cards[index].preservesPreviousAnalysis = false }
+            if status == "analyzed" {
+                if cards[index].requestedVariantID != nil {
+                    cards[index].userSelectedEdition = true
+                    cards[index].manualAssignment = false
+                    cards[index].requestedAnalysisVersion = OwnedCard.currentAnalysisVersion
+                }
+                cards[index].preservesPreviousAnalysis = false
+                cards[index].requestedVariantID = nil
+                if cards[index].automaticScan == true || analysis.finishPolicy != nil {
+                    cards[index].isScanDraft = false
+                }
+                cards[index].photoRecheck = nil
+            }
             if let collection = mergedCollection {
                 if let i = collections.firstIndex(where: { $0.id == collection.id }) { collections[i] = collection }
                 else { collections.append(collection) }
@@ -248,12 +333,22 @@ public struct DiskStore: Sendable {
         guard FileManager.default.fileExists(atPath: file.path) else { return Library() }
         var library = try JSONDecoder().decode(Library.self, from: Data(contentsOf: file))
         for index in library.cards.indices { library.cards[index].analysis = library.cards[index].analysis?.withoutTransientPricing() }
-        return library
+        library.removedCards = library.removedCards?.map { record in
+            var stored = record
+            stored.analysis = record.analysis?.withoutTransientPricing()
+            return stored
+        }
+        return consumeSavedScanReceipts(in: library)
     }
     public func save(_ library: Library) throws {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         var durable = library
         for index in durable.cards.indices { durable.cards[index].analysis = durable.cards[index].analysis?.withoutTransientPricing() }
+        durable.removedCards = durable.removedCards?.map { record in
+            var stored = record
+            stored.analysis = record.analysis?.withoutTransientPricing()
+            return stored
+        }
         let data = try encoder.encode(durable)
         try data.write(to: root.appendingPathComponent("library.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
@@ -283,6 +378,9 @@ public struct DiskStore: Sendable {
         updated = queueAnalysis(at: index, jobID: jobID, in: updated)
         updated.cards[index].preservesPreviousAnalysis = false
         updated.cards[index].manualAssignment = nil
+        updated.cards[index].tiltFile = nil
+        updated.cards[index].proposedPhotoMatch = nil
+        updated.cards[index].userSelectedEdition = nil
         updated.cards[index].fastPipeline = true
         // Commit the queue advance with the new photo revision. A crash cannot resubmit this step.
         if var queue = updated.unclearCardQueue {
@@ -338,7 +436,7 @@ public struct DiskStore: Sendable {
 
     /// One explicit support operation reinspects saved pixels for all finished
     /// cards. The operation marker commits with the jobs, preventing a second lap.
-    public func reanalyzeAllSaved(operationID: String, in library: Library) throws -> Library {
+    public func reanalyzeAllSaved(operationID: String, in library: Library, clearCurrentPrices: Bool = false) throws -> Library {
         guard UUID(uuidString: operationID) != nil else { throw StoreError.invalidResult }
         guard library.savedPhotoReanalysisOperationID != operationID else { return library }
         let indices = library.cards.indices.filter { ["analyzed", "failed"].contains(library.cards[$0].state) }
@@ -353,11 +451,69 @@ public struct DiskStore: Sendable {
             updated = queueAnalysis(at: index, jobID: UUID().uuidString.lowercased(), in: updated)
             updated.cards[index].preservesPreviousAnalysis = library.cards[index].hasDisplayableAnalysis
             updated.cards[index].fastPipeline = library.cards[index].manualAssignment != true
+            if clearCurrentPrices {
+                updated.cards[index].personalPrice = nil
+                updated.burnManualValues?.removeValue(forKey: updated.cards[index].id)
+                updated.cards[index].preservesPreviousAnalysis = false
+                if var analysis = updated.cards[index].analysis {
+                    analysis.marketLowCents = nil
+                    analysis.marketHighCents = nil
+                    analysis.marketSources = []
+                    analysis.marketCheckedAt = ""
+                    analysis.unpricedBaseExpiresAt = nil
+                    analysis.cardSightVariants = nil
+                    analysis.comparableEstimate = nil
+                    analysis.insights?.marketReferences = []
+                    analysis.insights?.marketBullets = []
+                    analysis.insights?.sourceChecks = []
+                    updated.cards[index].analysis = analysis
+                }
+            }
             // Manual assignment stays attached to the card and submission.
         }
         updated.savedPhotoReanalysisOperationID = operationID
         try save(updated)
         return updated
+    }
+
+    public func recheckPhotos(ids: Set<String>, operation: String, in library: Library) throws -> Library {
+        guard UUID(uuidString: operation) != nil, !ids.isEmpty, ids.count <= 200 else { throw StoreError.invalidResult }
+        if library.savedPhotoReanalysisOperationID == operation { return library }
+        let indices = library.cards.indices.filter { ids.contains(library.cards[$0].id) }
+        guard indices.count == ids.count else { throw StoreError.invalidResult }
+        var result = library
+        for i in indices {
+            let card = library.cards[i]
+            guard card.awaitingBack != true, card.requestedVariantID == nil,
+                  !(try Data(contentsOf: photoURL(card.frontFile))).isEmpty else { throw StoreError.invalidResult }
+            if let back = card.backFile, try Data(contentsOf: photoURL(back)).isEmpty { throw StoreError.missingFront }
+            result = queueAnalysis(at: i, jobID: UUID().uuidString.lowercased(), in: result)
+            result.cards[i].fastPipeline = true
+            result.cards[i].automaticScan = true
+            result.cards[i].photoRecheck = true
+            result.cards[i].preservesPreviousAnalysis = card.analysis != nil
+        }
+        result.savedPhotoReanalysisOperationID = operation
+        try save(result)
+        return result
+    }
+
+    public func addTilt(_ data: Data, cardID: String, jobID: String, in library: Library) throws -> Library {
+        guard let i = library.cards.firstIndex(where: { $0.id == cardID && $0.jobID == jobID }),
+              library.cards[i].canCaptureFinishAngle, !data.isEmpty else { throw StoreError.invalidResult }
+        let revision = UUID().uuidString.lowercased()
+        let name = cardID + "-tilt-" + revision + ".jpg"
+        var result = queueAnalysis(at: i, jobID: revision, in: library)
+        result.cards[i].tiltFile = name
+        result.cards[i].automaticScan = true
+        result.cards[i].photoRecheck = true
+        result.cards[i].preservesPreviousAnalysis = true
+        try writePhoto(data, name: name)
+        do { try save(result) } catch {
+            try? FileManager.default.removeItem(at: photoURL(name))
+            throw error
+        }
+        return result
     }
 
     private func queueAnalysis(at index: Int, jobID: String, in library: Library) -> Library {
@@ -369,6 +525,7 @@ public struct DiskStore: Sendable {
         updated.cards[index].analysisJobID = jobID
         updated.cards[index].requestedAnalysisVersion = OwnedCard.currentAnalysisVersion
         updated.cards[index].refreshOfJobID = nil
+        updated.cards[index].requestedVariantID = nil
         updated.cards[index].uploadedJobID = nil
         updated.cards[index].hasProvisionalAnalysis = false
         updated.cards[index].state = "queued"; updated.cards[index].error = nil

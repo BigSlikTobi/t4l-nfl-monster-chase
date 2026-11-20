@@ -60,8 +60,8 @@ Photos leave the phone for remote analysis. Worker access uses private pairing, 
 ### Open and build
 
 ```sh
-git clone https://github.com/BigSlikTobi/monster-chase.git
-cd monster-chase/card-scout-ios
+git clone https://github.com/BigSlikTobi/t4l-nfl-monster-chase.git
+cd t4l-nfl-monster-chase/card-scout-ios
 open CardScout.xcodeproj
 ```
 

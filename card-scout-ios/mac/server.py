@@ -21,8 +21,9 @@ from schema import ANALYSIS_VERSION
 from scan_matches import rank_matches, candidates, capture_hints, review_notice
 from reference_images import load as load_references, overlay as reference_overlay, coverage as reference_coverage
 from chases import load_catalog
-from cardsight import Market, PRODUCTS
+from cardsight import Market, MarketError, PRODUCTS
 from card_prices import PriceResearch
+from card_lookup import CardLookup
 from catalog_supplement import load_all
 
 MAX_BODY = 24_000_000
@@ -62,7 +63,12 @@ class Repository:
         except (ValueError, KeyError, TypeError, OSError): self.chases = None
         self.market = Market(self.root)
         self.card_prices = PriceResearch(self.root)
-        self.card_prices_enabled = read_json(self.root / "config.json", {}).get("cardSightResearchEnabled", False)
+        self.card_lookup = CardLookup(self.root)
+        self.market.owned_prices_pending = lambda: bool(self.card_prices.pending or self.card_lookup.pending)
+        config = read_json(self.root / "config.json", {})
+        self.direct_identification = config.get("cardSightIdentifyEnabled", config.get("cardSightResearchEnabled", False))
+        self.defer_direct_prices = config.get("cardSightDeferPricing", False)
+        self.card_prices_enabled = config.get("cardSightResearchEnabled", False) or self.direct_identification
     @contextmanager
     def db(self):
         connection = sqlite3.connect(self.root / "queue.sqlite3", timeout=10)
@@ -80,9 +86,20 @@ class Repository:
         if not isinstance(identity, str) or not UUID.fullmatch(identity): raise ValueError("Ungültige Karten-ID.")
         front = image_bytes(payload.get("front")); back = image_bytes(payload["back"]) if payload.get("back") else None
         digest = hashlib.sha256(front + b"\0SIDE\0" + (back or b"")).hexdigest()
+        supplemental = {}
+        for key, filename in (("surfaceFront", "surface.jpg"), ("tiltFront", "tilt.jpg")):
+            if payload.get(key) is not None:
+                photo = image_bytes(payload[key])
+                if len(photo) > 2_000_000: raise ValueError("Zusatzfoto zu groß.")
+                supplemental[filename] = photo
+        if "tilt.jpg" in supplemental:
+            digest = hashlib.sha256(digest.encode() + b"\0TILT\0" + supplemental["tilt.jpg"]).hexdigest()
         refresh_of = payload.get("refreshOf")
         if refresh_of is not None and (not isinstance(refresh_of, str) or not UUID.fullmatch(refresh_of)):
             raise ValueError("Ungültige vorherige Analyse.")
+        variant_choice = payload.get("variantID")
+        if variant_choice is not None and (not isinstance(variant_choice, str) or not refresh_of or payload.get("assignment") is not None):
+            raise ValueError("Ungültige Variante.")
         pipeline = payload.get("pipeline", "full")
         if pipeline not in ("fast", "full", "match"): raise ValueError("Ungültiger Analysemodus.")
         text = payload.get("captureText")
@@ -104,28 +121,43 @@ class Repository:
             if existing:
                 if existing["status"] == "cancelled": return self.public(existing)
                 if existing["digest"] != digest: raise ValueError("Diese Karten-ID gehört zu anderen Fotos.")
+                if variant_choice is not None:
+                    saved = json.loads(existing["result"]) if existing["result"] else read_json(self.jobroot / identity / "refresh.json", {})
+                    selected = (saved.get("analysis", {}).get("cardSightIdentity") or {}).get("parallelID") or "base"
+                    if selected != variant_choice: raise ValueError("Diese Analyse gehört zu einer anderen Variante.")
                 if pipeline == "fast" and existing["status"] == "queued":
                     db.execute("UPDATE jobs SET pipeline='fast' WHERE id=?", (identity,))
                 return self.public(existing)
             if db.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','processing','identified','enriching')").fetchone()[0] >= MAX_QUEUE: raise QueueFull("Warteschlange voll. Bitte später erneut versuchen.")
-            folder = self.jobroot / identity; folder.mkdir(exist_ok=True); folder.chmod(0o700)
-            (folder / "front.jpg").write_bytes(front)
-            if back: (folder / "back.jpg").write_bytes(back)
-            if text: (folder / "capture-text.txt").write_text(text, encoding="utf-8")
-            if assignment: atomic_json(folder / "identity.json", assignment)
+            refresh_result = None
             if refresh_of:
                 prior = db.execute("SELECT * FROM jobs WHERE id=? AND status='analyzed' AND digest=?", (refresh_of, digest)).fetchone()
                 previous = json.loads(prior["result"]) if prior and prior["result"] else None
                 a = previous.get("analysis", {}) if previous else {}
                 # Only server-owned evidence for identical pixels can skip identification/condition.
-                if a.get("identityConfirmed") and a.get("insights") and previous.get("collection"):
-                    atomic_json(folder / "refresh.json", previous)
+                if variant_choice is not None:
+                    if not previous or a.get("assessmentSource") != "cardsight": raise ValueError("Vorherige Karte fehlt.")
+                    refresh_result = self.card_lookup.select(previous, variant_choice, self.catalog)
+                elif a.get("identityConfirmed") and a.get("insights") and previous.get("collection"):
+                    refresh_result = previous
+            # Validate a revision before creating any private transport files.
+            folder = self.jobroot / identity; folder.mkdir(exist_ok=True); folder.chmod(0o700)
+            (folder / "front.jpg").write_bytes(front)
+            if back: (folder / "back.jpg").write_bytes(back)
+            for filename, photo in supplemental.items():
+                (folder / filename).write_bytes(photo)
+            if text: (folder / "capture-text.txt").write_text(text, encoding="utf-8")
+            if assignment: atomic_json(folder / "identity.json", assignment)
+            if refresh_result is not None: atomic_json(folder / "refresh.json", refresh_result)
             db.execute("INSERT INTO jobs(id,digest,status,created_at,updated_at,pipeline) VALUES(?,?,'queued',?,?,?)", (identity, digest, now(), now(), pipeline))
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identity,)).fetchone()
             return self.public(row)
     def public(self, row):
         result = json.loads(row["result"]) if row["result"] else {}
-        if self.card_prices_enabled:
+        direct = result.get("analysis", {}).get("assessmentSource") == "cardsight"
+        if direct:
+            result = self.card_lookup.attach(result)
+        elif self.card_prices_enabled:
             result = self.card_prices.attach(result)
             a = result.get("analysis") or {}
             if a and not (a.get("insights") or {}).get("marketReferences"):
@@ -137,10 +169,36 @@ class Repository:
             result["collection"] = reference_overlay([result["collection"]], self.references())[0]
         response = {"matchNotice": result.get("matchNotice"), "matches": result.get("matches"), "id": row["id"], "status": row["status"], "analysis": result.get("analysis"), "collection": result.get("collection"), "error": row["error"]}
         if self.card_prices_enabled and result.get("analysis"):
-            response["priceStatus"] = self.card_prices.status(result["analysis"])
+            response["priceStatus"] = self.price_service(result["analysis"]).status(result["analysis"])
             if result["analysis"].get("comparableEstimate") and response["priceStatus"] != "refreshing":
                 response["priceStatus"] = "estimate"
         return response
+    def price_service(self, analysis):
+        return self.card_lookup if analysis.get("assessmentSource") == "cardsight" else self.card_prices
+    def start_prices(self, analysis):
+        if analysis.get("assessmentSource") == "cardsight" and self.defer_direct_prices: return
+        self.price_service(analysis).start(analysis)
+    def reviewed_prices(self, source, request):
+        if set(request) != {"cardID", "setID", "variantID", "cachedOnly"} or type(request["cachedOnly"]) is not bool:
+            raise ValueError("Invalid price request")
+        with self.db() as db:
+            row = db.execute("SELECT result FROM jobs WHERE id=? AND status='analyzed'", (source,)).fetchone()
+        if not row or not row["result"]:
+            return None
+        original = json.loads(row["result"])
+        analysis = original["analysis"]
+        identity = analysis.get("cardSightIdentity") or {}
+        variant = request["variantID"]
+        if (analysis.get("assessmentSource") != "cardsight" or identity.get("slabbed")
+                or (identity.get("cardID"), identity.get("setID")) != (request["cardID"], request["setID"])
+                or not any(option["id"] == variant for option in analysis.get("cardSightVariants", []))):
+            raise ValueError("Finish does not match the analyzed card")
+        selected = self.card_lookup.select(original, variant, self.catalog)
+        if not request["cachedOnly"]:
+            self.card_lookup.start(selected["analysis"])
+        priced = self.card_lookup.attach(selected)["analysis"]
+        return dict(id=source, status="analyzed", analysis=priced, priceStatus=self.card_lookup.status(priced))
+
     def get(self, identity):
         with self.db() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identity,)).fetchone()
@@ -174,6 +232,16 @@ class Repository:
             row = db.execute("SELECT status FROM jobs WHERE id=?", (identity,)).fetchone()
             if not row or row[0] == "cancelled": return
             if result.get("collection"):
+                if result.get("analysis", {}).get("assessmentSource") == "cardsight":
+                    incoming = result["collection"]
+                    previous = next((c for c in self.catalog if c["id"] == incoming["id"]), None)
+                    if previous and not incoming["checklistComplete"]:
+                        rows = {c["number"]: c for c in previous["cards"]}
+                        for card in incoming["cards"]:
+                            if card["number"] in rows and rows[card["number"]]["player"] != card["player"]:
+                                raise ValueError("Conflicting provider checklist row")
+                            rows[card["number"]] = card
+                        incoming["cards"] = list(rows.values())
                 self.catalog = [c for c in self.catalog if c["id"] != result["collection"]["id"]] + [result["collection"]]
                 self.catalog, self.catalog_coverage = load_all(self.catalog, self.root)
                 atomic_json(self.catalog_file, self.catalog)
@@ -185,6 +253,9 @@ class Repository:
             row = db.execute("SELECT status,result,pipeline FROM jobs WHERE id=?", (identity,)).fetchone()
             if not row: raise ValueError("Karte nicht gefunden.")
             if row["status"] == "failed": db.execute("UPDATE jobs SET status=?,error=NULL,updated_at=? WHERE id=?", ("identified" if row["pipeline"] == "fast" and row["result"] else "queued", now(), identity))
+            elif row["status"] == "identified" and row["pipeline"] == "match":
+                if not (self.jobroot / identity / "front.jpg").exists(): raise ValueError("Saved front missing")
+                db.execute("UPDATE jobs SET status='queued',error=NULL,updated_at=? WHERE id=?", (now(), identity))
         return self.get(identity)
     def requeue(self, identity):
         with self.db() as db: db.execute("UPDATE jobs SET status=CASE WHEN status='enriching' THEN 'identified' ELSE 'queued' END,error=NULL,updated_at=? WHERE id=? AND status IN ('processing','enriching')", (now(), identity))
@@ -193,7 +264,7 @@ class Repository:
             row = db.execute("SELECT status FROM jobs WHERE id=?", (identity,)).fetchone()
             return row is not None and row[0] == "cancelled"
     def cleanup_transport(self, identity):
-        for name in ("front.jpg", "back.jpg", "worker.log", "result.json", "schema.json", "refresh.json", "identity.json", "capture-text.txt", "identification.json", "retrieval.json"):
+        for name in ("front.jpg", "back.jpg", "surface.jpg", "tilt.jpg", "worker.log", "result.json", "schema.json", "refresh.json", "identity.json", "capture-text.txt", "identification.json", "identity-resolution.json", "retrieval.json"):
             (self.jobroot / identity / name).unlink(missing_ok=True)
     def discard(self, identity):
         with self.lock, self.db() as db:
@@ -235,12 +306,20 @@ class Worker(threading.Thread):
                 self.stop.set(); return
             if not identity: self.stop.wait(2); continue
             try:
+                if self.repo.direct_identification:
+                    cancel = JobStop(self.stop, self.repo, identity)
+                    result = self.repo.card_lookup.identify(self.repo.jobroot / identity, self.repo.catalog, cancel)
+                    if cancel.is_set(): raise InterruptedError("Job stopped")
+                    self.repo.finish(identity, result)
+                    self.repo.start_prices(result["analysis"])
+                    continue
                 pending = self.repo.get(identity)
                 if pending and pending.get("analysis"):
                     # public() can contain a transient price view. Never copy it
                     # into transport files that can outlive the provider TTL.
                     if self.repo.card_prices_enabled:
                         pending["analysis"]["insights"]["marketReferences"] = []
+                        pending["analysis"]["insights"].pop("scoutEstimate", None)
                         pending["analysis"]["insights"]["marketBullets"] = []
                         pending["analysis"]["insights"]["sourceChecks"] = []
                     atomic_json(self.repo.jobroot / identity / "identification.json", {"analysis": pending["analysis"]})
@@ -249,7 +328,7 @@ class Worker(threading.Thread):
                     result["matches"] = [row[1] for row in candidates(result["analysis"], self.repo.checklists(), capture_hints(self.repo.jobroot / identity))[:5]]
                     result["matchNotice"] = review_notice(result["analysis"], self.repo.catalog)
                 if self.repo.card_prices_enabled and not JobStop(self.stop, self.repo, identity).is_set():
-                    self.repo.card_prices.lookup(result["analysis"])
+                    self.repo.card_prices.start(result["analysis"])
                 if JobStop(self.stop, self.repo, identity).is_set(): raise InterruptedError("Job stopped")
                 self.repo.finish(identity, result)
             except InterruptedError:
@@ -269,6 +348,13 @@ class IdentificationWorker(threading.Thread):
             except Exception: self.stop.set(); return
             if not identity: self.stop.wait(0.4); continue
             try:
+                if self.repo.direct_identification:
+                    cancel = JobStop(self.stop, self.repo, identity)
+                    output = self.repo.card_lookup.identify(self.repo.jobroot / identity, self.repo.catalog, cancel)
+                    if cancel.is_set(): raise InterruptedError("Job stopped")
+                    self.repo.finish(identity, output)
+                    self.repo.start_prices(output["analysis"])
+                    continue
                 output = run_identification(self.repo.jobroot / identity, self.repo.catalog, self.config, JobStop(self.stop, self.repo, identity))
                 if self.repo.wants_matches(identity):
                     diagnostics = {}
@@ -281,7 +367,10 @@ class IdentificationWorker(threading.Thread):
             except InterruptedError:
                 self.repo.requeue(identity)
                 if self.stop.is_set(): return
-            except Exception: self.repo.defer_identification(identity)
+            except MarketError as error: self.repo.fail(identity, str(error))
+            except Exception:
+                if self.repo.direct_identification: self.repo.fail(identity, "Kartenerkennung konnte nicht sicher geprüft werden. Bitte erneut versuchen.")
+                else: self.repo.defer_identification(identity)
             finally:
                 if self.repo.is_discarded(identity): self.repo.cleanup_transport(identity)
 
@@ -331,10 +420,13 @@ def handler(repo, token):
                     if product in PRODUCTS: return self.send(202, repo.market.refresh(product))
                 parts = self.path.strip("/").split("/")
                 if len(parts) == 4 and parts[:2] == ["v1", "jobs"] and UUID.fullmatch(parts[2]):
+                    if parts[3] == "review-prices" and repo.card_prices_enabled:
+                        result = repo.reviewed_prices(parts[2], data)
+                        return self.send(200 if result else 404, result or {"error": "Karte nicht gefunden."})
                     if parts[3] == "prices" and repo.card_prices_enabled:
                         job = repo.get(parts[2])
                         if not job or job["status"] == "cancelled": return self.send(404, {"error": "Karte nicht gefunden."})
-                        if job["status"] == "analyzed" and job.get("analysis"): repo.card_prices.start(job["analysis"])
+                        if job["status"] == "analyzed" and job.get("analysis"): repo.start_prices(job["analysis"])
                         return self.send(202, repo.get(parts[2]))
                     if parts[3] == "retry": return self.send(200, repo.retry(parts[2]))
                     if parts[3] == "ack": repo.ack(parts[2]); return self.send(200, {"status": "ok"})
@@ -377,11 +469,13 @@ def main():
                 try:
                     with repo.market.condition: repo.market.purge()
                     repo.card_prices.purge()
+                    repo.card_lookup.purge()
                 except OSError: pass
                 last_purge = time.monotonic()
     finally:
         stop.set(); repo.market.stop.set()
         repo.card_prices.executor.shutdown(wait=False, cancel_futures=True)
+        repo.card_lookup.executor.shutdown(wait=False, cancel_futures=True)
         with repo.market.condition: repo.market.condition.notify_all()
         http.server_close(); worker.join(timeout=15); identity_worker.join(timeout=15)
 

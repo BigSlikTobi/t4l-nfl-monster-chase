@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import ssl
 import statistics
+import tempfile
 import threading
 import time
 import unicodedata
@@ -29,10 +30,11 @@ PRODUCTS = {
     "2026-topps-flagship-football": ("7d7b6650-5ea9-4340-b3e7-83a29ec52480", "2026", "Topps Flagship Football"),
 }
 CACHE_SECONDS = 24 * 60 * 60
+USAGE_CHECK_SECONDS = 3600
 MAX_RESULTS = 500
 MAX_CALLS_PER_SCAN = 140
-MONTHLY_CAP = 720  # User-selected stop below the free plan's 750 calls.
-DAILY_CAP = MONTHLY_CAP  # The pilot's extra daily stop must not strand an otherwise free monthly budget.
+MONTHLY_CAP = 5000  # User-authorized Pro allowance; call-pack purchases remain separate.
+DAILY_CAP = MONTHLY_CAP
 MAX_CATALOG_CARDS = 5000
 
 
@@ -41,10 +43,56 @@ class MarketError(RuntimeError):
 
 
 def atomic(path, value):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-    temporary.chmod(0o600)
-    temporary.replace(path)
+    # Independent scan lanes may publish the same catalog cache entry at once.
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+@contextmanager
+def provider_call(provider, operation):
+    """Journal request counts and wire timings without payloads or credentials."""
+    started = time.monotonic()
+    status = {"http": None}
+    try:
+        yield status
+    finally:
+        print("cardscout_provider " + json.dumps(dict(provider=provider, operation=operation,
+              seconds=round(time.monotonic()-started, 4), http=status["http"])), flush=True)
+
+
+@contextmanager
+def cache_work(path, stop=None):
+    """One writer per cache key, including a CLI refresh alongside the server."""
+    while True:
+        if stop and stop.is_set(): raise InterruptedError("Job stopped")
+        with path.open("a") as handle:
+            if stop is None:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+            else:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    time.sleep(0.05)
+                    continue
+            # Another writer may have finished and unlinked its lock while we
+            # were waiting. Only the holder of the current inode may enter.
+            try:
+                current = path.stat()
+            except FileNotFoundError:
+                continue
+            if not os.path.samestat(current, os.fstat(handle.fileno())):
+                continue
+            try:
+                if stop and stop.is_set(): raise InterruptedError("Job stopped")
+                yield
+            finally:
+                path.unlink(missing_ok=True)
+            return
 
 
 def normal(value):
@@ -244,25 +292,53 @@ class Client:
             finally: fcntl.flock(handle, fcntl.LOCK_UN)
 
     def request(self, method, path, params=None, body=None):
-        if (method, path) not in (("GET", "/v1/subscription/"), ("GET", "/v1/catalog/sets"), ("GET", "/v1/catalog/parallels"), ("GET", "/v1/catalog/cards"), ("POST", "/v1/pricing/"), ("GET", "/v1/pricing/search")):
+        identify = method == "POST" and path == "/v1/identify/card/football"
+        single_price = method == "GET" and re.fullmatch(r"/v1/pricing/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", path)
+        card_detail = method == "GET" and re.fullmatch(r"/v1/catalog/cards/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", path)
+        if card_detail and (params or body is not None): raise MarketError("Unsichere Kartenanfrage abgelehnt.")
+        if not identify and not single_price and not card_detail and (method, path) not in (("GET", "/v1/subscription/"), ("GET", "/v1/catalog/sets"), ("GET", "/v1/catalog/parallels"), ("GET", "/v1/catalog/cards"), ("POST", "/v1/pricing/"), ("GET", "/v1/pricing/search")):
             raise MarketError("CardSight-Anfrage nicht erlaubt.")
+        if identify and (params or not isinstance(body, bytes) or not 0 < len(body) <= 20_000_000
+                         or not body.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n"))):
+            raise MarketError("Ungültiges Kartenfoto.")
+        if single_price:
+            if (not isinstance(params, dict) or set(params) not in ({"parallel_id", "grade_id", "period", "listing_type", "limit"}, {"grade_id", "period", "listing_type", "limit"})
+                    or params.get("grade_id") != "null" or params.get("period") != "90d"
+                    or params.get("listing_type") not in ("both", "auction")
+                    or (params.get("listing_type") == "both" and "parallel_id" in params)
+                    or params.get("limit") != (25 if "parallel_id" in params else 500)
+                    or ("parallel_id" in params and (not isinstance(params["parallel_id"], str)
+                    or not re.fullmatch(r"null|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", params["parallel_id"])))):
+                raise MarketError("Unsichere Preisanfrage abgelehnt.")
         if path == "/v1/pricing/search":
             if (not isinstance(params, dict) or set(params) != {"q", "period", "listing_type", "limit"}
                     or not isinstance(params.get("q"), str) or not 2 <= len(params["q"]) <= 300
-                    or params.get("period") not in ("90d", "1y") or params.get("listing_type") != "auction" or params.get("limit") != 25):
+                    or (params.get("period"), params.get("listing_type")) not in (("90d", "auction"), ("1y", "auction"), ("90d", "fixed"))
+                    or params.get("limit") != 25):
                 raise MarketError("Unsichere Verkaufssuche abgelehnt.")
-        if method == "POST":
+        if method == "POST" and not identify:
             if (not isinstance(body, dict) or not 1 <= len(body.get("card_ids", [])) <= 100
-                    or "parallel_id" not in body or (body["parallel_id"] is not None and
+                    or ("parallel_id" not in body and body.get("limit") != 50)
+                    or (body.get("parallel_id") is not None and
                         (not isinstance(body["parallel_id"], str) or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", body["parallel_id"])))
+                    or type(body.get("limit")) is not int or body["limit"] not in (25, 50)
                     or body.get("period") not in ("90d", "1y")
-                    or any(body.get(k, "missing") != v for k, v in {"grade_id": None, "listing_type": "auction", "limit": 25}.items())):
+                    or body.get("grade_id", "missing") is not None
+                    or body.get("listing_type") not in ("both", "auction")
+                    or (body.get("listing_type") == "both" and ("parallel_id" in body or body.get("limit") != 50))):
                 raise MarketError("Unsichere Preisanfrage abgelehnt.")
         with self.budget_lock():
             ledger = self.ledger()
             if ledger.get("haltUntil", 0) > time.time(): raise MarketError("CardSight pausiert. Konto oder Gratis-Limit prüfen.")
             if ledger["calls"] >= MONTHLY_CAP or ledger.get("daily", 0) >= DAILY_CAP:
-                raise MarketError("Gratis-Budget erreicht. Vorhandene Preise bleiben bis zum Ablauf verfügbar.")
+                raise MarketError("API-Budget erreicht. Vorhandene Preise bleiben bis zum Ablauf verfügbar.")
+            # All worker clients share this ledger and reserve every request.
+            # Reuse the sanitized account check for an hour, including across
+            # processes. Caps and provider error halts above always take priority.
+            checked = ledger.get("subscriptionCheckedAt", 0)
+            if (path == "/v1/subscription/" and type(checked) in (int, float)
+                    and 0 <= time.time() - checked < USAGE_CHECK_SECONDS):
+                return {"calls": ledger["calls"]}
             secret = load_key(self.root / "cardsight-api-key") if self.transport is None else "fixture"
             ledger["calls"] += 1; ledger["daily"] = ledger.get("daily", 0) + 1
             atomic(self.ledger_path, ledger)  # Count even failed/uncertain requests, before sending.
@@ -272,15 +348,19 @@ class Client:
                 time.sleep(max(0, 1 - (time.monotonic() - self.last_call)))
                 self.last_call = time.monotonic()
                 connection = http.client.HTTPSConnection("api.cardsight.ai", timeout=25, context=ssl.create_default_context())
-                payload = json.dumps(body).encode() if body is not None else None
-                try:
-                    connection.request(method, path + ("?" + urlencode(params) if params else ""), body=payload,
-                                       headers={"X-API-Key": secret, "Accept": "application/json", "Content-Type": "application/json"})
-                    response = connection.getresponse(); status = response.status
-                    raw = response.read(16_000_001)
-                    if len(raw) > 16_000_000: raise MarketError("CardSight-Antwort zu groß.")
-                    data = json.loads(raw) if status == 200 else {}
-                finally: connection.close()
+                payload = body if identify else json.dumps(body).encode() if body is not None else None
+                content_type = ("image/png" if body.startswith(b"\x89PNG") else "image/jpeg") if identify else "application/json"
+                operation = re.sub(r"/[a-f0-9-]{36}$", "/:id", path)
+                with provider_call("CardSight", operation) as metric:
+                    try:
+                        connection.request(method, path + ("?" + urlencode(params) if params else ""), body=payload,
+                                           headers={"X-API-Key": secret, "Accept": "application/json", "Content-Type": content_type})
+                        response = connection.getresponse(); status = response.status
+                        metric["http"] = status
+                        raw = response.read(16_000_001)
+                        if len(raw) > 16_000_000: raise MarketError("CardSight-Antwort zu groß.")
+                        data = json.loads(raw) if status == 200 else {}
+                    finally: connection.close()
             if status in (401, 402, 403, 429) or 300 <= status < 400:
                 ledger["haltUntil"] = time.time() + CACHE_SECONDS
                 atomic(self.ledger_path, ledger)
@@ -291,6 +371,7 @@ class Client:
                 used = data.get("calls")
                 if type(used) is not int or used < 0: raise MarketError("Gratis-Budget konnte nicht geprüft werden.")
                 ledger["calls"] = max(ledger["calls"], used + 1)
+                ledger["subscriptionCheckedAt"] = time.time()
                 atomic(self.ledger_path, ledger)
                 return {"calls": ledger["calls"]}
             return data
@@ -306,6 +387,7 @@ class Market:
         self.states = {}
         self.stop = threading.Event()
         self.worker = None
+        self.owned_prices_pending = lambda: False
         self.purge()
 
     def cache_path(self, product):
@@ -370,6 +452,10 @@ class Market:
         def request(method, path, params=None, body=None):
             nonlocal calls
             if self.stop.is_set(): raise MarketError("Aktualisierung unterbrochen.")
+            # Existing requests can finish; new ranking requests wait for owned
+            # card pricing without restarting a partly completed ranking scan.
+            while self.owned_prices_pending():
+                if self.stop.wait(0.25): raise MarketError("Aktualisierung unterbrochen.")
             if calls >= MAX_CALLS_PER_SCAN: raise MarketError("Gratis-Budget für diese Aktualisierung erreicht.")
             calls += 1
             return self.client.request(method, path, params, body)

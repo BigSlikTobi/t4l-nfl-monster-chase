@@ -56,7 +56,7 @@ class MatchTests(unittest.TestCase):
             client = Client(root, lambda *args: (calls.append(args) or 200, {}))
             params = {"q": "2025 Donruss Optic CeeDee Lamb 9", "period": "1y", "listing_type": "auction", "limit": 25}
             client.request("GET", "/v1/pricing/search", params)
-            for changes in [{"listing_type": "fixed"}, {"listing_type": "both"}, {"period": "all"}, {"q": "x"}, {"limit": 500}]:
+            for changes in [{"listing_type": "fixed"}, {"listing_type": "both"}, {"period": "all"}, {"q": "x"}, {"limit": 500}, {"limit": True}]:
                 with self.assertRaises(MarketError): client.request("GET", "/v1/pricing/search", dict(params, **changes))
             self.assertEqual(len(calls), 1)
 
@@ -177,6 +177,30 @@ class IntegrationTests(unittest.TestCase):
             for bad in ['[]', '{"expiresAt":"never"}', '{bad json']:
                 market.cache_path(OPTIC).write_text(bad)
                 self.assertEqual(market.status(OPTIC)["status"], "empty")
+
+    def test_subscription_check_reused_across_clients_without_weakening_limits(self):
+        with tempfile.TemporaryDirectory() as root:
+            calls = []
+            def transport(*args):
+                calls.append(args)
+                return 200, {"calls": 20, "api_keys": [{"key": "never-expose-me"}]}
+            client = Client(root, transport)
+            self.assertEqual(client.request("GET", "/v1/subscription/")["calls"], 21)
+            other = Client(root, transport)
+            self.assertEqual(other.request("GET", "/v1/subscription/")["calls"], 21)
+            self.assertEqual(len(calls), 1)
+            other.request("GET", "/v1/catalog/cards")
+            self.assertEqual(client.ledger()["calls"], 22)
+            ledger = client.ledger(); ledger["subscriptionCheckedAt"] = time.time() - 3601
+            atomic_path = client.ledger_path
+            atomic_path.write_text(json.dumps(ledger))
+            client.request("GET", "/v1/subscription/")
+            self.assertEqual(len(calls), 3)
+            self.assertNotIn("never-expose-me", atomic_path.read_text())
+            ledger = client.ledger(); ledger["calls"] = MONTHLY_CAP
+            atomic_path.write_text(json.dumps(ledger))
+            with self.assertRaises(MarketError): other.request("GET", "/v1/subscription/")
+            self.assertEqual(len(calls), 3)
 
     def test_durable_quota_and_secret_redaction(self):
         with tempfile.TemporaryDirectory() as root:

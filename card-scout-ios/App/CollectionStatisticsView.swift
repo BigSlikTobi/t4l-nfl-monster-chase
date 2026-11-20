@@ -2,52 +2,6 @@ import SwiftUI
 import Charts
 import CardScoutCore
 
-struct CollectionStatisticsView: View {
-    @State private var section = "Wert"
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                Picker(tr("Insights"), selection: $section) {
-                    Text(tr("Wert")).tag("Wert")
-                    Text(tr("Moves")).tag("Moves")
-                    Text(tr("Entdecken")).tag("Entdecken")
-                }.pickerStyle(.segmented)
-                if section == "Wert" {
-                    PortfolioDashboardContent(section: .value)
-                    NavigationLink { PurchaseLedgerView() } label: {
-                        Label(tr("Kaufbuch & Ausgaben"), systemImage: "book.closed").frame(maxWidth: .infinity, alignment: .leading)
-                    }.buttonStyle(ScoutSecondaryButtonStyle())
-                } else if section == "Moves" {
-                    PortfolioDashboardContent(section: .moves)
-                } else {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text(tr("Chase")).font(.system(.largeTitle, design: .rounded, weight: .black))
-
-                        NavigationLink { HotListView() } label: {
-                            insightDoor(tr("Chase-Ranglisten"), detail: "Sets, Varianten & Marktpreise", symbol: "sparkles")
-                        }.buttonStyle(CollectorPressStyle())
-                        NavigationLink { HuntListView() } label: {
-                            insightDoor(tr("Dein Lookout"), detail: "Die Karten, die dir noch fehlen", symbol: "scope")
-                        }.buttonStyle(CollectorPressStyle())
-                    }
-                }
-            }.padding(20)
-        }.background(Color.scoutCanvas).navigationTitle(tr("Insights")).navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { NavigationLink { PurchaseLedgerView() } label: { Image(systemName: "book.closed") }.accessibilityLabel(tr("Kaufbuch")) } }
-    }
-    private func insightDoor(_ title: String, detail: String, symbol: String) -> some View {
-        HStack(spacing: 16) {
-            Image(systemName: symbol).font(.title2).foregroundStyle(Color.scoutGold).frame(width: 36)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(trDisplay(title)).font(.headline).foregroundStyle(Color.scoutInk)
-                Text(trDisplay(detail)).font(.caption).foregroundStyle(Color.scoutMuted)
-            }
-            Spacer(minLength: 0)
-            Image(systemName: "chevron.right").font(.caption).foregroundStyle(Color.scoutMuted)
-        }.padding(20).background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 18))
-    }
-}
-
 struct PurchaseLedgerView: View {
     @Environment(AppStore.self) private var store
     @State private var editingPurchase: CardPurchase?
@@ -115,20 +69,20 @@ struct PurchaseEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    HStack {
+                        TextField(tr("0,00"), text: $amount).font(.system(.largeTitle, design: .monospaced, weight: .bold)).keyboardType(.decimalPad).accessibilityLabel(tr("Gesamt bezahlt"))
+                        Picker(tr("Währung"), selection: $currency) { ForEach(CardPurchase.currencies, id: \.self) { Text(trDisplay($0)).tag($0) } }.labelsHidden()
+                    }
+                } header: { Text(tr("Gesamt bezahlt")) } footer: {
+                    Text(tr("Gesamtbetrag inklusive Versand und Gebühren. Pack-/Boxkosten nur einmal buchen."))
+                }.listRowBackground(Color.white.opacity(0.7))
                 Section(tr("Kauf")) {
                     TextField(tr("Bezeichnung"), text: $title)
                     Picker(tr("Kategorie"), selection: $category) { ForEach(PurchaseCategory.allCases) { Text(trDisplay($0.label)).tag($0) } }
                     Stepper(tr("\(quantity) Stück"), value: $quantity, in: 1...999)
                     DatePicker(tr("Gekauft am"), selection: $date, in: ...Date(), displayedComponents: .date)
-                }
-                Section {
-                    HStack {
-                        TextField(tr("0,00"), text: $amount).keyboardType(.decimalPad).accessibilityLabel(tr("Gesamt bezahlt"))
-                        Picker(tr("Währung"), selection: $currency) { ForEach(CardPurchase.currencies, id: \.self) { Text(trDisplay($0)).tag($0) } }.labelsHidden()
-                    }
-                } header: { Text(tr("Gesamt bezahlt")) } footer: {
-                    Text(tr("Gesamtbetrag inklusive Versand und Gebühren. Pack-/Boxkosten nur einmal buchen."))
-                }
+                }.listRowBackground(Color.white.opacity(0.7))
                 if let cardID = purchase.cardID, let card = store.library.cards.first(where: { $0.id == cardID }) {
                     Section(tr("Zugehörige Karte")) { Text(cardTitle(card)) }
                 }
@@ -140,7 +94,7 @@ struct PurchaseEditorView: View {
                 if existing {
                     Section { Button(tr("Kauf entfernen"), role: .destructive) { confirmDelete = true } }
                 }
-            }.scrollContentBackground(.hidden).background(Color.scoutCanvas)
+            }.scrollContentBackground(.hidden).background(Color(red: 0.95, green: 0.92, blue: 0.84))
                 .navigationTitle(trDisplay(existing ? "Kauf bearbeiten" : "Kauf erfassen")).navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button(tr("Abbrechen")) { dismiss() } }
@@ -152,7 +106,7 @@ struct PurchaseEditorView: View {
                 .confirmationDialog(tr("Kauf aus den Ausgaben entfernen?"), isPresented: $confirmDelete, titleVisibility: .visible) {
                     Button(tr("Kauf entfernen"), role: .destructive) { if store.deletePurchase(purchase.id) { dismiss() } }
                 } message: { Text(tr("Die Karten und Fotos bleiben erhalten.")) }
-        }
+        }.preferredColorScheme(.light).presentationDragIndicator(.visible)
     }
     private var canSave: Bool {
         !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && title.count <= 200 && CardPurchase.parseAmount(amount) != nil

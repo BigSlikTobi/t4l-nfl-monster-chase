@@ -1,3 +1,4 @@
-"NSCameraUsageDescription" = "Karten fotografieren und Verbindungscode scannen.";
+"NSCameraUsageDescription" = "Karten fotografieren, Packs filmen und einen Kopplungscode scannen.";
+"NSMicrophoneUsageDescription" = "Ton für deine Pack-Videos aufnehmen.";
 "NSLocalNetworkUsageDescription" = "Deinen Analyse-Server sicher verbinden.";
 "CFBundleDisplayName" = "Burn Count";

@@ -2,13 +2,6 @@ import SwiftUI
 import Charts
 import CardScoutCore
 
-private func binderColor(_ name: String) -> Color {
-    if name.localizedCaseInsensitiveContains("bowman") { return Color(red: 0.13, green: 0.28, blue: 0.50) }
-    if name.localizedCaseInsensitiveContains("donruss") { return .scoutBrandLight }
-    if name.localizedCaseInsensitiveContains("topps") { return Color(red: 0.47, green: 0.20, blue: 0.17) }
-    return Color(red: 0.28, green: 0.23, blue: 0.43)
-}
-
 /// Field markings and diagonal foil bands, drawn locally behind the real card photos.
 struct CardArena: View {
     var color: Color = .scoutBrandLight
@@ -70,64 +63,6 @@ struct FoilSweep: View {
     }
 }
 
-struct BinderCover: View {
-    @Environment(AppStore.self) private var store
-    let binder: CollectionBinder
-    var body: some View {
-        let cards = binder.cards(in: store.library).sorted { $0.createdAt > $1.createdAt }
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(tr("\(Set(binder.collections.map { String($0.year) }).sorted().joined(separator: " · "))"))
-                    .font(.system(size: 9, weight: .heavy, design: .monospaced)).tracking(1.3).foregroundStyle(.white.opacity(0.65))
-                Text(trDisplay(binder.name)).font(.system(.title2, design: .rounded, weight: .black)).foregroundStyle(.white)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(tr("\(cards.count) KARTEN  /  \(binder.collections.count) TYPEN"))
-                    .font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(.white.opacity(0.8))
-                Label(tr("Binder öffnen"), systemImage: "arrow.up.right")
-                    .font(.caption.weight(.bold)).foregroundStyle(Color.scoutEditorialGold)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            CardFan(cards: Array(cards.prefix(3))).frame(width: 120).clipped()
-        }.padding(.leading, 20).padding(.trailing, 8).padding(.vertical, 10)
-            .background { CardArena(color: binderColor(binder.name)) }
-            .clipShape(RoundedRectangle(cornerRadius: 20))
-            .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.12)))
-            .accessibilityElement(children: .combine)
-    }
-}
-
-struct BinderContentsView: View {
-    @Environment(AppStore.self) private var store
-    let binderID: String
-    @State private var search = ""
-    var body: some View {
-        if let binder = store.library.binders.first(where: { $0.id == binderID }) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text(tr("\(binder.cards(in: store.library).count) Karten · nach Jahr und Kartentyp sortiert"))
-                        .font(.subheadline).foregroundStyle(Color.scoutMuted)
-                    ForEach(Array(Set(binder.collections.map(\.year))).sorted(by: >), id: \.self) { year in
-                        let types = binder.collections.filter {
-                            $0.year == year && (search.isEmpty || "\($0.name) \($0.subset) \($0.parallel ?? "")".localizedStandardContains(search))
-                        }
-                        if !types.isEmpty {
-                            ScoutSectionHeader(trDisplay(String(year)), subtitle: tr("\(types.count) Kartentypen"))
-                            ForEach(types) { collection in
-                                NavigationLink { CollectionView(collectionID: collection.id) } label: {
-                                    CollectionCover(collection: collection)
-                                }.buttonStyle(.plain)
-                            }
-                        }
-                    }
-                    if !search.isEmpty && !binder.collections.contains(where: {
-                        "\($0.name) \($0.subset) \($0.parallel ?? "")".localizedStandardContains(search)
-                    }) { ScoutEmptyState(symbol: "magnifyingglass", title: tr("Keine Kartentypen gefunden.")) }
-                }.padding(20)
-            }.background(Color.scoutCanvas).navigationTitle(trDisplay(binder.name))
-                .searchable(text: $search, prompt: tr("Base, Chrome, Optic oder Variante"))
-        } else { ScoutEmptyState(symbol: "books.vertical", title: tr("Binder nicht verfügbar.")) }
-    }
-}
-
 struct ShowcaseCard: View {
     let card: OwnedCard
     var position: Int = 1
@@ -165,19 +100,11 @@ struct CollectorPressStyle: ButtonStyle {
 
 struct CollectiblesView: View {
     @Environment(AppStore.self) private var store
+    @AppStorage("clubhouseFeaturedCardID") private var featuredID = ""
     var body: some View {
-        ScrollView {
-            if store.library.collectibles.isEmpty {
-                ScoutEmptyState(symbol: "trophy", title: tr("Deine Collectibles."), message: tr("Markiere deine Lieblingsstücke mit der Trophäe in den Kartendetails.")).padding(20)
-            } else {
-                ShowcaseDeck(cards: store.library.collectibles).padding(20)
-            }
-        }.background(Color.scoutCanvas).navigationTitle(tr("Collectibles"))
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink { ShowcasePickerView() } label: { Image(systemName: "plus").frame(width: 44, height: 44) }
-                        .accessibilityLabel(tr("Karte auswählen"))
-                }
-            }
+        ClubhouseGallery { id in
+            featuredID = id
+            store.selectedTab = 0
+        }
     }
 }

@@ -29,7 +29,7 @@ public struct MarketReference: Codable, Hashable, Sendable {
         return lowCents == highCents ? low : "\(low) – \((Double(highCents) / 100).formatted(style))"
     }
     public var gradeLabel: String { grade == "raw" ? "Ungegradet" : grade }
-    public var kindLabel: String { kind == "guide" ? "Richtwert" : "Verkauf" }
+    public var kindLabel: String { kind == "guide" ? "Richtwert" : kind == "ask" ? "Angebot" : "Verkauf" }
     public var shippingLabel: String {
         switch shipping {
         case "included": "inkl. Versand"
@@ -50,6 +50,22 @@ public struct SourceCheck: Codable, Hashable, Sendable {
     }
 }
 
+public struct CardScoutValue: Codable, Hashable, Sendable {
+    public let amountCents: Int
+    public let currency: String
+    public let shipping: String
+    public let checkedAt: String
+    public let expiresAt: Double
+
+    public var valueLabel: String { CollectionCardValue.money(amountCents, currency: currency) }
+
+    func isFresh(asOf: Date) -> Bool {
+        let now = asOf.timeIntervalSince1970
+        return (1...100_000_000).contains(amountCents) && CardPurchase.currencies.contains(currency) &&
+            ["included", "excluded", "unknown"].contains(shipping) && expiresAt > now && expiresAt <= now + 86_460
+    }
+}
+
 public struct CardInsights: Codable, Hashable, Sendable {
     public var rarityTier: String
     public var rarityBullets: [String]
@@ -60,6 +76,12 @@ public struct CardInsights: Codable, Hashable, Sendable {
     public var marketReferences: [MarketReference]
     public var sourceChecks: [SourceCheck]
     public var actionReason: String
+    public var scoutEstimate: CardScoutValue? = nil
+
+    public static var pricingOnly: CardInsights {
+        CardInsights(rarityTier: "unknown", rarityBullets: [], conditionStatus: "unknown", conditionIssues: [],
+                     conditionLimitations: [], marketBullets: [], marketReferences: [], sourceChecks: [], actionReason: "")
+    }
 
     public var rarityLabel: String {
         ["base": "Basiskarte", "insert": "Insert", "parallel": "Parallel", "numbered": "Nummeriert", "one_of_one": "1 of 1", "unknown": "Variante offen"][rarityTier] ?? "Variante offen"
@@ -74,6 +96,28 @@ public struct CardInsights: Codable, Hashable, Sendable {
     /// A graded or non-matching reference must never become the headline value of a raw card.
     public var rawReference: MarketReference? {
         return marketSummary()?.primary
+    }
+
+    /// Exact asking evidence, kept separate from the public valuation.
+    public func askingSummary(asOf: Date = Date()) -> RawMarketSummary? {
+        let asks = marketReferences.filter {
+            $0.kind == "ask" && $0.isFresh(asOf: asOf) && $0.grade == "raw" &&
+            $0.matchQuality == "exact" && $0.lowCents > 0 && $0.highCents == $0.lowCents
+        }
+        // Keep item-only, delivered, and different currencies separate, just as for sales.
+        let groups = Dictionary(grouping: asks) { $0.currency + ":" + $0.shipping }
+        let ranked = groups.keys.sorted {
+            let left = groups[$0]!, right = groups[$1]!
+            if left.count != right.count { return left.count > right.count }
+            let leftDate = left.map(\.checkedAt).max() ?? "", rightDate = right.map(\.checkedAt).max() ?? ""
+            if leftDate != rightDate { return leftDate > rightDate }
+            return $0 < $1
+        }
+        guard let key = ranked.first else { return nil }
+        return RawMarketSummary(references: groups[key]!.sorted {
+            if $0.checkedAt != $1.checkedAt { return $0.checkedAt > $1.checkedAt }
+            return ($0.listingURL ?? $0.url) < ($1.listingURL ?? $1.url)
+        })
     }
 
     public func marketSummary(asOf: Date = Date()) -> RawMarketSummary? {
@@ -117,9 +161,10 @@ public struct RawMarketSummary: Sendable {
     public var comparison: ComparableEstimate? = nil
     public var primary: MarketReference { references[0] }
     public var isComparable: Bool { comparison != nil }
+    public var isAsking: Bool { !isComparable && primary.kind == "ask" }
     public var isGuide: Bool { !isComparable && primary.kind == "guide" }
     public var isEstimate: Bool { isGuide || isComparable }
-    public var basisLabel: String { isComparable ? "Vergleichsmedian · \(references.count) Karten · geringe Sicherheit" : isGuide ? "Richtwert" : references.count == 1 ? "Einzelverkauf" : "Median · \(references.count) Verkäufe" }
+    public var basisLabel: String { isComparable ? "Vergleichsmedian · \(references.count) Karten · geringe Sicherheit" : isGuide ? "Richtwert" : isAsking ? (references.count == 1 ? "Einzelangebot" : "Median · \(references.count) Angebote") : references.count == 1 ? "Einzelverkauf" : "Median · \(references.count) Verkäufe" }
     public var orderingValueCents: Double {
         if isGuide { return Double(primary.lowCents) }
         // Each comparison card contributes once. Ranged guides contribute their midpoint.
@@ -140,6 +185,7 @@ public struct RawMarketSummary: Sendable {
     }
     public var dateLabel: String {
         if let comparison { return "Vergleich erstellt: \(comparison.checkedAt)" }
+        if isAsking { return "Stand: \(primary.checkedAt)" }
         let dates = references.compactMap(\.saleDate).sorted()
         guard let first = dates.first, let last = dates.last else { return "Stand: \(primary.checkedAt)" }
         return first == last ? "Verkauft: \(first)" : "Verkäufe: \(first) – \(last)"
@@ -150,8 +196,18 @@ extension CardAnalysis {
     /// Transient provider evidence is never written into library.json or backups.
     public func withoutTransientPricing() -> CardAnalysis {
         var copy = self
+        if !copy.hasUnpricedBaseAllowance(asOf: Date()) { copy.unpricedBaseExpiresAt = nil }
         copy.comparableEstimate = nil
+        copy.cardSightVariants = copy.cardSightVariants?.map { option in
+            var clean = option
+            clean.medianCents = nil; clean.askingMedianCents = nil
+            clean.soldCount = nil; clean.askingCount = nil
+            clean.askingCurrency = nil; clean.soldShipping = nil; clean.askingShipping = nil; clean.expiresAt = nil
+            clean.scoutValue = nil
+            return clean
+        }
         if var info = copy.insights {
+            info.scoutEstimate = nil
             let transient = info.marketReferences.contains { ["CardSight", "Slabline", "Midpoint"].contains($0.provider) } || info.sourceChecks.contains { ["CardSight", "Slabline", "Midpoint"].contains($0.provider) }
             info.marketReferences.removeAll { ["CardSight", "Slabline", "Midpoint"].contains($0.provider) }
             info.sourceChecks.removeAll { ["CardSight", "Slabline", "Midpoint"].contains($0.provider) }
@@ -163,8 +219,24 @@ extension CardAnalysis {
 
     public func currentPricing(asOf: Date = Date()) -> CardAnalysis {
         var copy = self
+        if !copy.hasUnpricedBaseAllowance(asOf: asOf) { copy.unpricedBaseExpiresAt = nil }
         if copy.comparableEstimate?.isFresh(asOf: asOf) != true { copy.comparableEstimate = nil }
+        copy.cardSightVariants = copy.cardSightVariants?.map { option in
+            guard let expiry = option.expiresAt, expiry.isFinite,
+                  expiry > asOf.timeIntervalSince1970, expiry <= asOf.timeIntervalSince1970 + 86_460 else {
+                var clean = option
+                clean.medianCents = nil; clean.askingMedianCents = nil
+                clean.soldCount = nil; clean.askingCount = nil
+                clean.askingCurrency = nil; clean.soldShipping = nil; clean.askingShipping = nil; clean.expiresAt = nil
+                clean.scoutValue = nil
+                return clean
+            }
+            var fresh = option
+            if option.scoutValue?.isFresh(asOf: asOf) != true { fresh.scoutValue = nil }
+            return fresh
+        }
         guard var info = copy.insights else { return copy }
+        if info.scoutEstimate?.isFresh(asOf: asOf) != true { info.scoutEstimate = nil }
         let expired = info.marketReferences.contains { !$0.isFresh(asOf: asOf) }
         info.marketReferences.removeAll { !$0.isFresh(asOf: asOf) }
         if expired {
@@ -191,10 +263,33 @@ extension CardAnalysis {
         guard identityConfirmed == true, knownIdentityConflict == nil else { return nil }
         return insights?.marketSummary() ?? comparableEstimate?.marketSummary()
     }
+    public func cardScoutValue(asOf: Date = Date()) -> CardScoutValue? {
+        guard identityConfirmed == true, knownIdentityConflict == nil,
+              let value = insights?.scoutEstimate, value.isFresh(asOf: asOf) else { return nil }
+        return value
+    }
+    public var askingSummary: RawMarketSummary? {
+        guard identityConfirmed == true, knownIdentityConflict == nil else { return nil }
+        return insights?.askingSummary()
+    }
+    func hasUnpricedBaseAllowance(asOf: Date) -> Bool {
+        guard let expiry = unpricedBaseExpiresAt, expiry.isFinite,
+              expiry > asOf.timeIntervalSince1970, expiry <= asOf.timeIntervalSince1970 + 86_460,
+              identityConfirmed == true, knownIdentityConflict == nil,
+              let identity = cardSightIdentity, !identity.slabbed, identity.parallelID == nil,
+              subset == "Base" || subset == "Chrome Base", insights?.rarityTier == "base",
+              parallel == nil, serialNumber == nil,
+              marketLowCents == nil, marketHighCents == nil,
+              comparableEstimate?.isFresh(asOf: asOf) != true,
+              insights?.marketReferences.contains(where: { $0.isFresh(asOf: asOf) }) == false else { return false }
+        return true
+    }
     public var actionLabel: String { ["Keep": "Behalten", "Sell": "Verkaufen", "Grade": "Grading prüfen", "Bulk": "Sammelkarte"][recommendation] ?? recommendation }
 
     public mutating func clearAssessmentAfterCorrection() {
-        comparableEstimate = nil
+        finishPolicy = nil; finishState = nil
+        cardSightIdentity = nil; cardSightVariants = nil; assessmentSource = nil
+        comparableEstimate = nil; unpricedBaseExpiresAt = nil
         marketLowCents = nil; marketHighCents = nil; marketSources = []; insights = nil
         psa10ChanceLow = nil; psa10ChanceHigh = nil; recommendation = "Keep"; needsReview = true
         rationale = "Zuordnung korrigiert. Neu bewerten für aktuelle Ergebnisse."

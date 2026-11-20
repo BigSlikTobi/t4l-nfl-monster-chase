@@ -24,6 +24,7 @@ for runtime in python3 openssl node npm; do
     fi
 done
 if ! command -v bwrap >/dev/null; then missing_packages+=(bubblewrap); fi
+python3 -c 'import numpy; from PIL import Image' >/dev/null 2>&1 || missing_packages+=(python3-numpy python3-pil)
 needs_bwrap_profile=false
 if [[ $(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true) == 1 && ! -f /etc/apparmor.d/bwrap-userns-restrict ]]; then
     needs_bwrap_profile=true
@@ -54,12 +55,15 @@ systemd-run --quiet --wait --pipe --collect --unit=cardscout-sandbox-check \
     --property=ReadWritePaths=/var/lib/cardscout --working-directory=/var/lib/cardscout \
     /usr/bin/env CODEX_HOME=/var/lib/cardscout/data/codex \
     /opt/cardscout/node_modules/.bin/codex --sandbox read-only sandbox /usr/bin/true
-for module in reference_images scan_matches catalog_supplement server analysis api_client retrieval card_prices raw_guides schema chases cardsight cardsight_pilot linux setup; do
+for module in dev reference_images scan_matches catalog_supplement server analysis api_client retrieval card_prices card_lookup scout_value listing_decisions chrome_finish surface_grid edition_review sold_search identity_decisions card_price_batch raw_guides schema chases cardsight cardsight_pilot linux setup; do
     install -m 0644 "$source_dir/mac/$module.py" "/opt/cardscout/service/$module.py"
 done
 install -m 0644 "$source_dir/mac/retrieve_page.cjs" /opt/cardscout/service/retrieve_page.cjs
 install -m 0644 "$source_dir/mac/data/collections.json" /opt/cardscout/service/data/collections.json
 install -m 0644 "$source_dir/mac/data/chases.json" /opt/cardscout/service/data/chases.json
+for ref in chrome-finish-surfaces.jpg chrome-insert-surfaces.jpg chrome-standard-layouts.jpg chrome-wave-comparison.jpg; do
+    install -m 0644 "$source_dir/mac/data/$ref" "/opt/cardscout/service/data/$ref"
+done
 install -m 0644 "$source_dir/mac/data/reference-images.json" /opt/cardscout/service/data/reference-images.json
 install -m 0644 "$source_dir/mac/data/chrome-checklist-supplement.json" /opt/cardscout/service/data/chrome-checklist-supplement.json
 install -m 0644 "$source_dir/mac/data/optic-checklist-supplement.json" /opt/cardscout/service/data/optic-checklist-supplement.json

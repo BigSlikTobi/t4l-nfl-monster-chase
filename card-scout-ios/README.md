@@ -1,5 +1,46 @@
 # Card Scout — iPhone + Mac
 
+The new scan route sends the front photo to CardSight and keeps the returned card
+UUID. The current source fetches recent raw auction and fixed-price listings by
+UUID. Decisions checks listing identity against the already identified card.
+The app uses one **Card Scout Value** in card details, Collection and Burn Count.
+The worker multiplies the checked asking median by a sold-to-ask ratio
+calibrated across the market and adjusted for the variant group. Completed
+sales calibrate that ratio. A card stays open without a checked asking median
+or enough calibration evidence. Eligible ordinary base cards still have a
+separate €0 collection allowance. The worker starts with a variant halfway point of 10 distinct
+matches and can retune it from earlier listings and later sales in the
+24-hour cache. Adjusted asks require at least five comparable matches.
+Retuning requires later sales for at least 30 distinct cards across three
+variant groups and keeps the current setting when the gain is small. The
+worker persists only the weighting setting and its check date.
+Identification now checks provider confidence against on-device
+OCR. Medium/low results and contradictions escalate to automatic Decisions
+checks of card candidates and parallels. Unresolved identities remain unpriced.
+For 2026 Topps Flagship, the worker checks the exact card's catalog and any
+visible stamp or printed finish name. Large catalogs get a separate foil-pattern
+check to narrow the choices. If that fails, one automatic retry checks the
+original photos, close-up foil details, and reviewed photos from the same subset
+and finish when available. The finish retry is shared with other catalog routes.
+For supported releases, an unresolved card ID gets a focused read of the back
+and one exact-number catalog search. Another angle is requested only when it
+could reveal a specific difference between eligible finishes.
+The local worker now keeps card-scoped partial finishes, checks the selected
+finish's listings first, and reuses the same snapshot on a variant switch.
+See the [validation changes and recorded-request replay](docs/card-validation-optimization-2026-11-17.md).
+See [confidence routing](docs/confidence-routing-2026-11-17.md) and
+[quality and parallel requests](docs/quality-and-parallel-requests-2026-11-17.md).
+See [listing decisions and separate prices](docs/listing-decisions-and-prices-2026-11-17.md)
+for the implementation and earlier verification results.
+See [direct lookup, activation and limits](docs/direct-card-lookup-2026-11-17.md).
+Build **1.1 (52)** was installed on the paired iPhone. The asking-first dashboard was verified against the completed 108-scan run.
+See [variant search and switching](docs/variant-search-2026-11-17.md) for the
+shared all-variant snapshot and searchable variant picker.
+Developer-only checks are available through `python3 mac/dev.py`: quota,
+authenticated worker health, queue counts, and a combined doctor report.
+See [developer CLI](docs/developer-cli.md). No quota UI or endpoint is added to the app.
+The build/deployment notes below describe earlier workflows.
+
 Build **40** shows a **comparison median** instead of a broad comparison range as
 the headline. For €1, €1, €1 and €8, it shows **ca. €1**, with the €1–€8 range as
 supporting detail. Collection sorting and indicative totals use the same median.
@@ -106,7 +147,7 @@ See [chase research](docs/chase-research.md) for selection evidence and update r
 - Two or more comparable exact raw sales from the last 90 days produce a median and observed range. Currencies and shipping bases are not mixed. Otherwise prefer a labelled guide; a lone sale or a wider window (up to 365 days) remains explicit. Sources and sale dates are expandable. The collection tiles show the same labelled price, never a made-up portfolio total.
 - [PSA Auction Prices](https://www.psacard.com/auctionprices) are graded-card comparisons. They never become the headline price of an ungraded card. Inaccessible prices are not invented or access controls bypassed.
 - Guide values, actual sales, original currency, source condition bands, dates and exact/near/proxy matches are separate. Unknown shipping no longer hides an otherwise verified item-only reference; its shipping basis remains visible. Asking prices and unknown accepted offers are not sold prices.
-- The existing delivered-EUR value fields still require exact raw sales with known total costs. Labelled guide/item-only references are stored separately and are not a portfolio valuation. Missing data is not zero.
+- The binder, Top Cards, collection total and Burn Count use one value per owned card. A personal price takes priority, followed by the Card Scout estimate and then the exact raw sale amount or median. Sales use their original currency and shipping basis. Price Movement compares observations for the same card, finish, currency and valuation basis. The separate delivered-EUR fields require known total costs.
 - Condition bullets report clearly visible damage with its location. No obvious damage means only **Keine klaren Schäden sichtbar**, never Mint or PSA 10. Material photo limitations stay in **Foto-Details**. An unusable view explicitly requests a better photo.
 - Numbered rarity requires serial evidence. Low search counts or graded populations do not prove a small print run. No invented rarity score, damage discount or numeric grade probability.
 - The photo check is not professional grading. No **Grade** recommendation without verified grading economics. Missing price data alone does not mark the card damaged, trigger a general review warning, or justify **Bulk**.
@@ -237,7 +278,9 @@ Missing prices remain unknown. Similar-card sales provide a separate average
 price indicator; those indicators are excluded from known value. Sales are
 deduplicated across provider links by eBay item ID where available. Comparison
 averages never mix currency, shipping treatment, graded cards, or proxy matches.
-Currencies remain separate; there is no invented exchange rate or profit figure.
+Burn Count converts all available card values and card, pack, and box costs to
+the selected display currency using the European Central Bank reference rates.
+The purchase ledger retains the original currencies and amounts.
 
 The price leaderboard links to card details. Special-card selection is explicit:
 smallest visible serial-number limit first, then confirmed parallels, inserts,
@@ -532,3 +575,26 @@ amount and sign kept together. Threshold/range cases were covered by core tests.
 Installed in place on MyApple; fresh device inventory confirmed Burn Count
 1.1 (47). Automatic phone launch was denied because the device was locked;
 physical-device visual and collection-content acceptance remain user checks.
+
+### Personal card prices
+
+Open a collected card and tap **Your price / Dein Preis** to add, edit or remove
+an amount in EUR, USD or GBP. Both decimal dots and commas are accepted. An
+explicit zero is valid; a blank amount is unknown and cannot be saved.
+
+Personal prices persist locally with the card and appear in the card gallery.
+Value sorting uses them without converting currencies. Burn Count uses each
+personal price in place of that card's researched or cached value, once per
+physical card. Personal prices also drive portfolio totals and rankings. Research evidence and purchase
+expenses stay separate. Manual price changes are excluded from market-change calculations. A changed per-card estimate invalidates the previous
+manual collection-total estimate; that older total remains stored. Entering a
+new total explicitly overrides the current per-card amounts again.
+
+Validation (2026-11-07): 192 Swift tests (one existing skip, no failures),
+253 Python worker tests, localization audit (847 bilingual keys, 98 templates),
+Debug simulator build and shared-image source audit passed. Isolated simulator
+QA covered comma-decimal entry, add, edit, currency change, cancel, removal and
+persistence across restart/update. The before/after preservation check passed
+for all 100 synthetic cards/analyses, four collections and 12 original demo
+photos after price removal. No physical-device install or acceptance check was
+performed for this change.

@@ -64,7 +64,7 @@ final class ComparablePriceTests: XCTestCase {
         XCTAssertNil(summary.rangeLabel)
     }
 
-    func testCollectionUsesSameMedianAndKeepsComparisonsOutOfConfirmedValue() throws {
+    func testComparisonEvidenceNeverBecomesCardScoutValue() throws {
         var analysis = CardAnalysis(recommendation: "Keep", marketCheckedAt: "2026-11-06", marketSources: [], confidence: "high",
             conditionNotes: "", rationale: "", needsReview: false)
         analysis.identityConfirmed = true
@@ -73,12 +73,8 @@ final class ComparablePriceTests: XCTestCase {
         analysis.comparableEstimate = estimate([100, 100, 100, 800])
         var library = Library(); library.cards = [OwnedCard(state: "analyzed", analysis: analysis)]
         let stats = CollectionStatistics(library: library, asOf: now)
-        let value = try XCTUnwrap(stats.values.first)
-        XCTAssertEqual(value.lowCents, 100)
-        XCTAssertEqual(value.highCents, 100)
-        XCTAssertEqual(value.label, analysis.comparableEstimate?.marketSummary(asOf: now)?.valueLabel)
-        XCTAssertEqual(stats.indicativeCards, 1)
-        XCTAssertNil(stats.confirmedValue(currency: "EUR"))
+        XCTAssertTrue(stats.values.isEmpty)
+        XCTAssertEqual(analysis.comparableEstimate?.marketSummary(asOf: now)?.orderingValueCents, 100)
         XCTAssertTrue(CollectionStatistics(library: library, asOf: now.addingTimeInterval(301)).values.isEmpty)
     }
 

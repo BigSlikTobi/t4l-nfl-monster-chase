@@ -15,7 +15,7 @@
 
 # Repository scope
 
-- This root is the Git repo for `BigSlikTobi/monster-chase`.
+- This root is the Git repo for `BigSlikTobi/t4l-nfl-monster-chase`.
 - `card-scout-ios/` is the main native product, with SwiftUI app, Swift core package, and Python Mac/Linux worker.
 - `card-scout-app/` is the earlier React/TypeScript web prototype. Keep its runtime and storage separate from the native app.
 - Read the root README and the relevant component docs before changing behavior. Historical deployment notes are not proof of current runtime state.

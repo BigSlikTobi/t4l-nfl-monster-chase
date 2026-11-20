@@ -82,6 +82,9 @@ def main():
         supplement = source / f"data/{name}-checklist-supplement.json"
         if supplement.exists():
             shutil.copy2(supplement, root / supplement.name)
+    for name in ("chrome-finish-surfaces.jpg", "chrome-insert-surfaces.jpg", "chrome-standard-layouts.jpg", "chrome-wave-comparison.jpg"):
+        if (source / "data" / name).exists():
+            shutil.copy2(source / "data" / name, root / name)
     if reference_seed.exists() and not (root / "reference-images.json").exists():
         from reference_images import load as load_references
         load_references(reference_seed)
@@ -97,12 +100,18 @@ def main():
             temporary.write_text(json.dumps(chase_seed, ensure_ascii=False), encoding="utf-8")
             temporary.chmod(0o600); temporary.replace(chase_path)
         # Copy executable code out of iCloud/Documents so a background agent can read it reliably.
+        python = sys.executable
+        if subprocess.run([python, "-c", "import numpy; from PIL import Image"], capture_output=True).returncode:
+            environment = root / "worker-venv"
+            subprocess.run([python, "-m", "venv", str(environment)], check=True)
+            python = str(environment / "bin/python")
+            subprocess.run([python, "-m", "pip", "install", "numpy>=1.22,<3", "Pillow>=9.1,<15"], check=True)
         installed = root / "service"; installed.mkdir(exist_ok=True)
-        for filename in ("server.py", "scan_matches.py", "reference_images.py", "catalog_supplement.py", "analysis.py", "api_client.py", "retrieval.py", "card_prices.py", "raw_guides.py", "retrieve_page.cjs", "schema.py", "chases.py", "cardsight.py", "cardsight_pilot.py"):
+        for filename in ("dev.py", "server.py", "scan_matches.py", "reference_images.py", "catalog_supplement.py", "analysis.py", "api_client.py", "retrieval.py", "card_prices.py", "card_lookup.py", "scout_value.py", "listing_decisions.py", "chrome_finish.py", "surface_grid.py", "edition_review.py", "sold_search.py", "identity_decisions.py", "card_price_batch.py", "raw_guides.py", "retrieve_page.cjs", "schema.py", "chases.py", "cardsight.py", "cardsight_pilot.py"):
             shutil.copy2(source / filename, installed / filename)
         plist = Path.home() / "Library/LaunchAgents/com.tobiaslatta.cardscout.plist"
         plist.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"Label": "com.tobiaslatta.cardscout", "ProgramArguments": [sys.executable, str(installed / "server.py"), "--data", str(root)], "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 15, "WorkingDirectory": str(installed), "EnvironmentVariables": {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(Path.home())}, "StandardOutPath": str(root / "service.log"), "StandardErrorPath": str(root / "service-error.log")}
+        payload = {"Label": "com.tobiaslatta.cardscout", "ProgramArguments": [python, str(installed / "server.py"), "--data", str(root)], "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 15, "WorkingDirectory": str(installed), "EnvironmentVariables": {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(Path.home())}, "StandardOutPath": str(root / "service.log"), "StandardErrorPath": str(root / "service-error.log")}
         plist.write_bytes(plistlib.dumps(payload))
         domain = "gui/" + str(os.getuid())
         subprocess.run(["launchctl", "bootout", domain + "/com.tobiaslatta.cardscout"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

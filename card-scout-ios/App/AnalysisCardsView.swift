@@ -4,32 +4,25 @@ import CardScoutCore
 struct AnalysisCardsView: View {
     let analysis: CardAnalysis
     var provisional = false
-    var pricingPaused = false
     var assessmentCleared = false
-    let jump: (String) -> Void
     private var a: CardAnalysis { analysis.currentPricing() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            if a.identityConfirmed != true {
-                Label(tr("Zuordnung prüfen"), systemImage: "exclamationmark.circle.fill")
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(Color.scoutGold)
-            } else if ["unknown", "unlicensed"].contains(a.licenseScope ?? "unknown") {
+            if a.identityConfirmed == true && ["unknown", "unlicensed"].contains(a.licenseScope ?? "unknown") {
                 Label(tr("Lizenz prüfen"), systemImage: "exclamationmark.circle.fill")
                     .font(.subheadline.weight(.semibold)).foregroundStyle(Color.scoutGold)
             }
 
-            marketPanel.id("market")
-
-            InsightPanel(title: tr("Variante"), icon: "rectangle.stack", tint: .scoutGold, badge: a.discoveryRarity) {
+            if !["cardsight", "photoReview"].contains(a.assessmentSource ?? "") || !a.rarityFacts.isEmpty { InsightPanel(title: tr("Variante"), icon: "rectangle.stack", tint: .scoutGold, badge: a.discoveryRarity) {
                 if a.rarityFacts.isEmpty {
                     Text(tr("Variante noch offen")).font(.subheadline).foregroundStyle(Color.scoutMuted)
                 } else {
                     InsightBullets(items: a.rarityFacts)
                 }
-            }.id("rarity")
+            }.id("rarity") }
 
-            InsightPanel(title: tr("Zustand"), icon: "viewfinder", tint: a.insights?.conditionStatus == "visible_damage" ? .scoutGold : .scoutAccent) {
+            if !["cardsight", "photoReview"].contains(a.assessmentSource ?? "") { InsightPanel(title: tr("Zustand"), icon: "viewfinder", tint: a.insights?.conditionStatus == "visible_damage" ? .scoutGold : .scoutAccent) {
                 if let info = a.insights {
                     Text(trDisplay(info.conditionLabel)).font(.headline)
                     InsightBullets(items: info.conditionIssues)
@@ -44,9 +37,9 @@ struct AnalysisCardsView: View {
                 } else {
                     Text(tr("Foto-Check noch offen")).font(.subheadline).foregroundStyle(Color.scoutMuted)
                 }
-            }.id("condition")
+            }.id("condition") }
 
-            if !provisional && !assessmentCleared { ScoutPanel {
+            if !provisional && !assessmentCleared && !["cardsight", "photoReview"].contains(a.assessmentSource ?? "") { ScoutPanel {
                 HStack(alignment: .top, spacing: 14) {
                     Image(systemName: recommendationSymbol)
                         .font(.title2).foregroundStyle(Color.scoutAccent)
@@ -73,121 +66,6 @@ struct AnalysisCardsView: View {
                         .font(.subheadline.weight(.semibold))
                 }.tint(Color.scoutMuted)
             }
-        }
-    }
-
-    private func insightShortcut(_ title: String, symbol: String, target: String) -> some View {
-        Button { jump(target) } label: {
-            ScoutChip(trDisplay(title), systemImage: symbol)
-                .frame(minHeight: 44)
-        }.buttonStyle(.plain)
-            .accessibilityHint(tr("Springt zum Abschnitt \(title)"))
-    }
-
-    private var marketPanel: some View {
-        InsightPanel(title: tr("Markt"), icon: "chart.bar.xaxis", tint: .scoutAccent) {
-            if provisional {
-                HStack(spacing: 12) {
-                    if pricingPaused { Image(systemName: "pause.circle").foregroundStyle(Color.scoutMuted) }
-                    else { ProgressView().controlSize(.small) }
-                    Text(trDisplay(pricingPaused ? "Preisprüfung pausiert" : "Preis folgt")).font(.headline)
-                }
-                Text(trDisplay(pricingPaused ? "Die Karte ist gespeichert. Die Analyse wurde unterbrochen. Starte sie oben erneut; deine gespeicherten Fotos werden verwendet." : "Die Karte ist gespeichert. Verkäufe werden im Hintergrund geprüft.")).font(.footnote).foregroundStyle(Color.scoutMuted)
-            } else if assessmentCleared {
-                Text(tr("Bewertung offen")).font(.title2.weight(.semibold))
-                Text(tr("Deine Zuordnung ist gespeichert. „Neu bewerten“ prüft Zustand und Verkäufe.")).font(.footnote).foregroundStyle(Color.scoutMuted)
-            } else if let info = a.insights {
-                if let summary = a.marketSummary {
-                    VStack(alignment: .leading, spacing: 9) {
-                        Text(trDisplay(summary.valueLabel))
-                            .font(.system(.largeTitle, design: .rounded, weight: .bold))
-                            .foregroundStyle(Color.scoutAccent)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(trDisplay(summary.basisLabel)).font(.subheadline.weight(.semibold))
-                        Text(tr("Ungegradet · \(summary.primary.currency) · \(trDisplay(summary.primary.matchLabel))"))
-                            .font(.caption).foregroundStyle(Color.scoutMuted)
-                        if let range = summary.rangeLabel {
-                            Text(tr("\(trDisplay(summary.isComparable ? "Vergleichsspanne" : "Verkaufsspanne")): \(range)")).font(.caption).foregroundStyle(Color.scoutMuted)
-                        }
-                        if summary.isGuide {
-                            Text(tr("Schätzung aus Preisguide · kein bestätigter Verkauf"))
-                                .font(.caption).foregroundStyle(Color.scoutGold)
-                        }
-                        if let comparison = summary.comparison {
-                            Text(tr("Grobe Orientierung aus \(comparison.cardCount) anderen Spielern · \(trDisplay(comparison.scopeLabel)). Spielerwert kann stark abweichen."))
-                                .font(.caption).foregroundStyle(Color.scoutGold)
-                            Text(tr("Kein Preisbeleg für deine konkrete Karte."))
-                                .font(.caption).foregroundStyle(Color.scoutGold)
-                            DisclosureGroup(tr("Vergleichskarten & Quellen")) {
-                                ForEach(Array(comparison.references.enumerated()), id: \.offset) { _, reference in
-                                    MarketReferenceView(reference: reference)
-                                }
-                            }.font(.subheadline)
-                        }
-                        if !summary.isComparable && summary.primary.provider == "CardSight" {
-                            Text(tr("CardSight · gemeldete Auktionen · 24 Stunden verfügbar"))
-                                .font(.caption).foregroundStyle(Color.scoutMuted)
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(trDisplay(summary.primary.shippingLabel))
-                            Text(trDisplay(summary.dateLabel))
-                        }.font(.caption).foregroundStyle(Color.scoutMuted)
-                        if !summary.isComparable, let url = URL(string: summary.primary.url) {
-                            Link(destination: url) {
-                                Label(trDisplay(summary.primary.provider), systemImage: "arrow.up.right")
-                                    .font(.caption.weight(.semibold)).padding(.vertical, 4)
-                            }
-                        }
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text(tr("Preis noch offen")).font(.title2.weight(.bold))
-                        Text(tr("Kein passender Raw-Preis verfügbar.")).font(.subheadline).foregroundStyle(Color.scoutMuted)
-                    }
-                }
-                if !info.marketBullets.isEmpty {
-                    InsightBullets(items: Array(info.marketBullets.prefix(2)))
-                    if info.marketBullets.count > 2 {
-                        DisclosureGroup(tr("Mehr zum Markt")) {
-                            InsightBullets(items: Array(info.marketBullets.dropFirst(2))).padding(.top, 10)
-                        }.font(.subheadline).tint(Color.scoutMuted)
-                    }
-                }
-                if !info.marketReferences.isEmpty {
-                    Divider().overlay(Color.scoutMuted.opacity(0.1))
-                    DisclosureGroup {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ForEach(Array(info.marketReferences.enumerated()), id: \.offset) { _, reference in
-                                MarketReferenceView(reference: reference)
-                            }
-                        }.padding(.top, 12)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text(tr("Preisbelege")).font(.subheadline.weight(.semibold))
-                            Text(tr("\(info.marketReferences.count)"))
-                                .font(.caption.monospacedDigit().weight(.semibold))
-                                .padding(.horizontal, 8).padding(.vertical, 4)
-                                .background(Color.scoutElevated, in: Capsule())
-                        }
-                    }.tint(Color.scoutAccent)
-                }
-                if !info.sourceChecks.isEmpty {
-                    DisclosureGroup(tr("Recherche-Status")) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            ForEach(info.sourceChecks, id: \.provider) { check in
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(trDisplay(check.provider)).font(.caption.weight(.semibold))
-                                    Text(trDisplay(check.statusLabel)).font(.caption).foregroundStyle(Color.scoutMuted)
-                                }.accessibilityElement(children: .combine)
-                            }
-                        }.padding(.top, 10)
-                    }.font(.subheadline).tint(Color.scoutMuted)
-                }
-            } else {
-                Text(trDisplay(a.marketLabel)).font(.title2.weight(.bold))
-                Text(tr("Letzte gespeicherte Recherche")).font(.caption).foregroundStyle(Color.scoutMuted)
-            }
-            if !provisional && !assessmentCleared { Text(tr("Geprüft: \(a.marketCheckedAt.prefix(10))")).font(.caption2).foregroundStyle(Color.scoutMuted) }
         }
     }
 
@@ -290,48 +168,5 @@ private struct InsightBullets: View {
                 }.foregroundStyle(Color.scoutMuted).accessibilityElement(children: .combine)
             }
         }
-    }
-}
-
-private struct MarketReferenceView: View {
-    let reference: MarketReference
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline) {
-                    referenceValue
-                    Spacer(minLength: 8)
-                    Text(trDisplay(reference.gradeLabel)).font(.caption.weight(.semibold)).fixedSize()
-                }
-                VStack(alignment: .leading, spacing: 5) {
-                    referenceValue
-                    Text(trDisplay(reference.gradeLabel)).font(.caption.weight(.semibold))
-                }
-            }
-            Text(tr("\(trDisplay(reference.kindLabel)) · \(reference.currency) · \(trDisplay(reference.matchLabel))"))
-                .font(.caption.weight(.medium))
-                .foregroundStyle(reference.matchQuality == "exact" ? Color.scoutMuted : Color.scoutGold)
-            if let title = reference.title { Text(trDisplay(title)).font(.caption).fixedSize(horizontal: false, vertical: true) }
-            if reference.grade != "raw" {
-                Text(tr("Gegradeter Vergleich · kein Wert deiner ungegradeten Karte")).font(.caption).foregroundStyle(Color.scoutGold)
-            }
-            if let condition = reference.condition { Text(tr("Zustand laut Quelle: \(condition)")).font(.caption) }
-            Text(trDisplay(reference.shippingLabel)).font(.caption)
-            if let date = reference.saleDate { Text(tr("Verkauft: \(date)")).font(.caption) }
-            if let url = URL(string: reference.url) {
-                Link(destination: url) { Label(trDisplay(reference.provider), systemImage: "arrow.up.right").padding(.vertical, 4) }
-                    .font(.caption.weight(.semibold))
-            }
-            if let value = reference.listingURL, let url = URL(string: value) {
-                Link(destination: url) { Label(tr("eBay-Verkauf"), systemImage: "arrow.up.right").padding(.vertical, 4) }
-                    .font(.caption.weight(.semibold))
-            }
-        }.foregroundStyle(Color.scoutMuted).padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.scoutElevated, in: RoundedRectangle(cornerRadius: 16))
-    }
-    private var referenceValue: some View {
-        Text(trDisplay(reference.valueLabel)).font(.title3.weight(.bold)).foregroundStyle(.primary)
-            .fixedSize(horizontal: false, vertical: true)
     }
 }

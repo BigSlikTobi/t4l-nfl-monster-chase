@@ -1,0 +1,86 @@
+# Identifying 2025 Topps Chrome Football finishes
+
+Research and offline pilot, 19 November 2026
+
+**Recommendation. Keep ordinary scanning automatic.** Use the card back and checklist to establish which card it is. Use the front surface, printed finish marks and serial evidence to decide the edition. Save the scan even when the surface is unresolved. Ask for one slight tilt only when another view could settle the question.
+
+## What happened on the phone
+
+A read-only snapshot of the paired iPhone contained 151 card records. The 43 new scans were all 2025 Topps Chrome Football, including 42 in one session and one earlier scan. All 43 had front and back photos. Every saved player, subset and card number matched a row in the local import of Topps’ checklist. Multiple finishes share that row. An earlier and later Xavier Worthy FS-5 scan were counted separately. [Topps checklist](https://cdn.shopify.com/s/files/1/0662/9749/5709/files/2025_Chrome_Football_Checklist_040826.pdf?v=1775678965)
+
+Of the 42 scans in the main session, 23 were still drafts. Eighteen of those had a completed worker result, a confirmed identity flag and a single suggested checklist row. The saved results offered between 7 and 38 finish choices per card. Four other drafts had an unresolved worker result and one was unidentified. Outside those drafts, the snapshot also contained queued, processing and failed records. A local checklist assignment or queued refresh is insufficient evidence of a completed automatic identification.
+
+Twelve new fronts showed a conspicuous checkerboard. On visual review, seven had a neutral border, four hot pink and one lime green. The app’s saved finish agreed with the apparent edition on four. Five had a different or less specific saved finish and three were open. This comparison used photos with the phone labels visible. It measures one family in one batch.
+
+| Example | Phone result | Evidence in the saved scans |
+| --- | --- | --- |
+| Bo Nix #88 | X-Fractor | Repeating squares plus a lime border on several edges. Lime Green X-Fractor is the best-supported candidate. |
+| Tyler Shough #398 and Trey Amos #371 | X-Fractor | Both fronts have pink framing and repeating squares. Hot Pink X-Fractor fits both. |
+| Jared Verse FS-24 | Future Stars with no parallel | The insert has a checkerboard. Topps lists a Future Stars X-Fractor. Scope the match to this insert. |
+| Xavier Worthy FS-5 | Refractor in one scan, no parallel in the other | Both backs say REFRACTOR. Both fronts show smooth rainbow reflection. The same printed evidence should give consistent results. |
+| Kyler Murray #5 and Shedeur Sanders #315 | Football Leather Green Refractor | Neither photo pair substantiates the green leather appearance or a /99 stamp. Withhold that edition and its price. |
+| Tyrone Tracy Jr. #228 | Finish open, 201/275 observed | The front has a yellow border and a fine repeating pattern. Preserve the serial. Compare to an independently verified Yellow Wave example before accepting the precise finish. |
+
+Topps distinguishes the three X-Fractors and lists the Future Stars X-Fractor separately. Its product odds also distinguish base, rookie and insert families. Its MVP buyback table lists Green Football Leather at /99 and SuperFractor at /1 for the applicable base card. A missing stamp in an image is uncertainty. A box format, when known, can narrow the search but pack odds cannot identify a particular card. [Topps odds](https://cdn.shopify.com/s/files/1/0662/9749/5709/files/2025_Topps_Chrome_Football_Odds.pdf?v=1776193199) · [Topps box guide](https://ripped.topps.com/uk/what-2025-topps-chrome-football-box-is-best-for-you/) · [Topps parallel and numbering table](https://ripped.topps.com/wp-content/uploads/2026/04/Topps26_NFL-Buyback_Mail-In-Form_Rd2-2-1.pdf)
+
+## What the other scanners establish
+
+PSA documents a carousel of likely matches for ungraded submissions. eBay’s published scan-to-list workflow returns a list and pre-fills the listing after selection. eBay also describes reading graded cards, which have a label and certification number. These sources describe the interaction. They publish no comparable exact-finish accuracy on this batch of loose NFL cards. The product lesson is to do the catalog work before presenting a result. [PSA raw scanning](https://www.psacard.com/articles/articleview/11053/snap-to-submit-in-the-psa-app) · [eBay scan-to-list](https://www.ebayinc.com/stories/news/new-ebay-scanning-tool-to-cut-listing-time-in-half-for-trading-card-sellers/) · [eBay graded-card flow](https://investors.ebayinc.com/investor-news/press-release-details/2024/Collectors-and-eBay-Transactions-Close-Summer-Launch-Expected-for-Integrated-End-to-End-Hobby-Experience-2024-v7TdZlYpby/default.aspx)
+
+CardSight’s identification documentation distinguishes card confidence from ranked parallel suggestions and specifically describes the latter as a baseball beta. Our NFL records do contain named finishes. Some confidence values in the saved options are written by our own resolver after selection. They do not establish what the upstream provider originally returned. Keep CardSight as a candidate source and test football finishes against independent labels. [CardSight identification contract](https://play.cardsight.ai/endpoints/identify-card) · [Resolver](../mac/identity_decisions.py)
+
+## Where the current implementation loses evidence
+
+- The direct resolver can accept one high-confidence parallel when the photo supplies no serial. When the provider supplies no suggestions, it defaults to base if base is allowed in the catalog. With suggestions, it normally compares only their intersection with the catalog plus eligible base. A correct finish can exist in the checklist and never reach the image decision. Its finish prompt sends the owned images and option descriptions. It supplies no labeled finish reference images. These are source-level failure paths. An archived phone result alone cannot identify the branch taken for each card. [Identity resolver](../mac/identity_decisions.py)
+- The older checklist comparer already knows how to verify and send a reviewed exact image or a same-finish example. The shipped manifest has 152 reviewed 2025 Topps Chrome records, 144 for ordinary base, seven for All-Chrome Team and one Lightboard Logo Variation. It has zero examples labeled X-Fractor, Hot Pink X-Fractor or Lime Green X-Fractor for this release. Wiring the existing helper into the direct path still leaves these references to acquire and verify. [Reference comparer](../mac/scan_matches.py) · [Image manifest](../mac/data/reference-images.json)
+- The single-card flow leaves scans as drafts. The comparison UI shows the full variant picker whenever options exist, including on already-confirmed results. The two states are independent. Hiding the picker alone would let unsupported numbered editions through. [Capture state](../Core/Sources/CardScoutCore/Captures.swift) · [Comparison view](../App/ScanMatchView.swift) · [Collection transition](../Core/Sources/CardScoutCore/ScanMatches.swift)
+- The normal refresh path reuses a saved CardSight identity and has only a narrow exception for older base records. A price refresh alone will generally reproduce yesterday’s identity. Current OCR-only recovery without a provider detection also has an allowed-release list that omits 2025 Topps Chrome. Its independently sourced checklist is already present. [Refresh logic](../mac/card_lookup.py) · [Recovery rules](../mac/identity_decisions.py) · [Chrome checklist import](../mac/data/chrome-checklist-supplement.json)
+
+## What worked on the actual photos
+
+The offline pilot used the app’s existing perspective crop. It measured repeated vertical and horizontal edges across the front. When both measurements showed similar square spacing, it inspected four narrow outer strips for persistent pink or lime. It read no player name, saved finish, card ID, price or OCR. The operator provided the release scope. [Crop helper](../scripts/finish_pilot/main.swift) · [Pixel measurements](../scripts/finish_pilot/checkerboard.py)
+
+| New scan evidence | Pilot result |
+| --- | --- |
+| 12 visually apparent checkerboards | 11 detected. Rashid Shaheed’s Hot Pink candidate fell below the grid threshold. |
+| 31 other fronts | Zero grid calls. These include rainbow refractors, a yellow numbered foil, a dotted foil and plain-looking Chrome. |
+| Border on the 11 grid calls | Three pink, one lime and seven without a dominant pink or lime border. All agreed with visual review. |
+| Two earlier Chrome fronts examined after fixing the thresholds | Both produced no grid decision, consistent with their visible surfaces. Neither tested a new positive example. |
+
+An early version that scored diagonal frequencies mixed plain and patterned cards. Measuring repeated edges in both directions worked better. The thresholds were developed on the same 43 new scans. These numbers demonstrate recoverable evidence in the existing photos. They do not estimate accuracy on another collector’s phone. A weak or absent grid signal permits no inference about base, waves, leather, other colors or value.
+
+To reproduce on macOS, use Xcode’s Swift compiler and a Python with Pillow and NumPy. From the native component directory, pass only front photos known to belong to this release. Use a new private crop directory. The output CSV contains filenames and belongs with the private photos.
+
+```sh
+finish_run=$(mktemp -d)
+swiftc Core/Sources/CardScoutCore/CardPhotoCrop.swift \
+  Core/Sources/CardScoutCore/ScanCardFrame.swift scripts/finish_pilot/main.swift \
+  -o "$finish_run/rectify"
+"$finish_run/rectify" "$finish_run/crops" /path/to/private/fronts/*.jpg
+python3 scripts/finish_pilot/checkerboard.py "$finish_run"/crops/*.jpg > "$finish_run/surface.csv"
+```
+
+## How to ship it
+
+1. **Fix the finish decision for this release.** Retain the player, number, year, exact subset, licensing and card ID as soon as they agree. Give the finish its own pending/verified state and evidence source. Use the release checklist even when the provider misses the card. Build the eligible finish list using the exact card and subset. Include options supported by visible facts even when the provider omits them. Version the resolver and its caches. Make printed REFRACTOR trigger comparison with applicable refractors. Require positive front evidence to claim ordinary base on this release. Require a compatible legible stamp and distinguishing surface before accepting a numbered or 1/1 edition. An unresolved finish must stay out of exact prices, base allowances and exact binder completion. [Worker integration](../mac/card_lookup.py) · [Core model](../Core/Sources/CardScoutCore/Models.swift)
+2. **Give the matcher labeled comparisons.** Start with standard Chrome, smooth Refractor and the three X-Fractors, including the Future Stars insert on its own template. Acquire independently labeled photos under rights suitable for the intended use. Capture multiple copies or players, angles and backgrounds. Verify each label with the release checklist, a physical example or a credible certified example. Track the exact card separately from a pattern example. Compare border and background patches to those references, with checks for jersey colors, sleeves, glare, blur and serials. Use the local grid result as one input. If a model is needed, give it only eligible choices, relevant image crops, reviewed examples and an explicit unresolved option. Keep provider quota controls. Exact finish recognition must work independently of price availability.
+3. **Change what the collector sees.** When the result passes validation, file it on the same owned-card record and show the identified card. Keep manual correction behind an edit action. When the player is known and the foil is ambiguous, save the known identity immediately. If a missing reflection would distinguish the finalists, offer “Tilt the card slightly” and capture one extra front frame while tracking the same card. Skip that prompt if the missing item is a catalog reference. Reuse the existing camera stream, shared photo pipeline and cropper. Store any added evidence separately from the original front and back. Prototype tilt on hardware before relying on it. [Camera](../App/FastScanView.swift) · [Shared cropper](../Core/Sources/CardScoutCore/CardPhotoCrop.swift) · [Apple Vision tracking](https://developer.apple.com/documentation/vision/vntrackrectanglerequest)
+4. **Recheck existing scans safely.** Run the new policy on saved photo pairs in a read-only pass first. Diff the old and proposed identity, edition, binder, and price eligibility per physical card. Distinguish automatic assignments from explicit edits. Older selection receipts can represent acceptance of a suggestion or a manual choice, so preserve ambiguous prior decisions as proposed corrections. Recheck disputed confirmed results as well as drafts. For approved changes use a dedicated identity revision, reject stale responses, invalidate dependent prices, and reprice only verified editions through the existing route. Resume by card ID and evidence version. Compare card IDs, counts, original-photo hashes, folders, notes and personal prices before and after. Duplicate-looking scans remain distinct owned records.
+
+**Release check.** Keep the current batch as regression cases. Assemble a separate, blind set of known physical examples with different players, phones, lighting, sleeves and look-alike finishes. Keep repeat photos of one physical copy on the same side of the development/test split. Measure wrong automatic finishes, correct automatic finishes, unresolved cards, tilt requests and recovery after tilt separately. Include speed, paid calls per scan and cross-release false matches. Suggested first enablement gate for a finish family is zero false exact assignments on a blind trial with at least 100 auto-decided cards, plus explicit hard negatives and no false numbered or 1/1 claims. Even zero errors in 100 leaves a roughly 3% one-sided 95% upper error bound under independent sampling. Increase the sample before promising a stronger rate. Ship only the families that pass. The pilot and private review made no library writes or paid identification calls.
+
+## Implemented scanner
+
+The native app keeps the front and back and sends a rectified front detail through its existing authenticated worker. The worker establishes the checklist entry first. For this release it filters editions by serial and printed evidence, checks the foil grid and border, and compares the photo against eligible finishes. Where available, it supplies a checksum-verified standard reference from the same subset. A matching player reference and a design example are labeled separately.
+
+An exact result files on the existing owned-card record. An ambiguous finish stays open. A tilt request requires an optical distinction the new angle could resolve, and the second exposure stays separate from the originals. Rechecking a previously chosen edition keeps the prior assignment. An inconclusive result cannot establish a new edition or its price.
+
+The 43 saved scans include two Xavier Worthy copies. Both the staged and iPhone passes agreed on the 12 checkerboards, six smooth Refractors with a printed back mark and the 201/275 Yellow Wave. Some standard-finish decisions changed between matched and open across the passes. The images and players in this batch were used during development. It cannot establish a production accuracy rate or the benefit of a real tilt.
+
+## Reference comparison in the scanner
+
+The 2025 Chrome Football worker compares exposed foil and outer borders with labeled public photo details. Standard inserts have their own layout examples. The source manifest records the item page, original image URL and SHA-256 for each example. They can be rebuilt with `scripts/finish_pilot/build_reference_sheet.py`. The archived inputs to a replay contain original camera OCR and photographs only.
+
+After product and card identification, the worker checks serial tiers, checkerboard periodicity and eligible finishes. For smooth or ambiguous cards, it compares the actual front with the appropriate standard layout and reads the designation area on the back. An additional structured image inspection can resolve an uncertain smooth finish. A contradictory stamp, frame or texture prevents that inspection from filing the card. A tilt prompt requires a specific unresolved optical distinction between the standard issue and smooth Refractor, an obscuring reflection, and no existing tilt photo.
+
+A 42-scan replay used random case names, fresh provider identification, empty photo and decision caches, and the bundled public catalog. Neither the live queue, saved binder answers nor prices were supplied to the recognizer. Each complete prediction file was hashed before scoring locally. The first implementation filed 22 correctly and left 20 open. After adding structured front/back comparison, a second fresh replay matched all 42 identities and 39 exact finishes, left three open, and produced zero wrong filings and zero tilt prompts. The same cohort was used for both iterations. Physical tilt benefit and performance on previously unseen scans still require separate measurements.
