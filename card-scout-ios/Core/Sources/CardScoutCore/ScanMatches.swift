@@ -54,11 +54,25 @@ extension Library {
     /// Local fallback and manual search work even without the worker or Decisions.
     /// Only actual checklist rows are offered; parallel membership is never invented.
     public func matches(for card: OwnedCard, query: String = "", limit: Int = 5) -> [CardMatch] {
+        rankedMatches(for: card, query: query, limit: limit, readings: [:])
+    }
+
+    public func reviewMatches(for card: OwnedCard, query: String = "") -> [CardMatch] {
+        rankedMatches(for: card, query: query, limit: 10, readings: card.printedReadings ?? [:])
+    }
+
+    private func rankedMatches(for card: OwnedCard, query: String, limit: Int, readings: [String: String]) -> [CardMatch] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let printedNumber = readings["number"]
+        let printedPlayer = matchText(readings["player"])
+        let printedYear = readings["year"].flatMap(Int.init)
         let a = card.analysis
         var scored: [(CardMatch, Int)] = []
         for collection in collections {
+            if let printedYear, printedYear != collection.year { continue }
             for entry in collection.cards {
+                if let printedNumber, entry.number.caseInsensitiveCompare(printedNumber) != .orderedSame { continue }
+                if !printedPlayer.isEmpty && printedPlayer != matchText(entry.player) { continue }
                 let match = CardMatch(collectionID: collection.id, number: entry.number)
                 let text = "\(entry.player) \(entry.number) \(collection.year) \(collection.name) \(collection.subset) \(collection.parallel ?? "Base")"
                 if !query.isEmpty {
@@ -71,7 +85,7 @@ extension Library {
                 let suggested = card.matchSuggestions?.contains(match) == true
                 let ocr = " " + matchText(card.captureText) + " "
                 let ocrName = !matchText(entry.player).isEmpty && ocr.contains(" " + matchText(entry.player) + " ")
-                guard !query.isEmpty || name || number || suggested || ocrName else { continue }
+                guard !query.isEmpty || printedNumber != nil || !printedPlayer.isEmpty || name || number || suggested || ocrName else { continue }
                 var score = (name ? 30 : 0) + (number ? 20 : 0)
                 if a?.year == collection.year { score += 12 }
                 if matchText(a?.setName) == matchText(collection.name) { score += 16 }

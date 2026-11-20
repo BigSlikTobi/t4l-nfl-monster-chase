@@ -13,7 +13,8 @@ final class PersonalCardPriceTests: XCTestCase {
 
     func testPersonalEstimateOverridesBurnOnceWithoutChangingResearchOrHistory() throws {
         var analysis = CardAnalysis(recommendation: "Keep", marketCheckedAt: "2026-11-07", marketSources: [], confidence: "high", conditionNotes: "", rationale: "", needsReview: false)
-        analysis.identityConfirmed = true; analysis.marketLowCents = 1000; analysis.marketHighCents = 1000; analysis.currency = "EUR"
+        analysis.identityConfirmed = true
+        analysis.setFixtureScoutValue(1000, asOf: Date())
         let card = OwnedCard(state: "analyzed", analysis: analysis)
         var library = Library(); library.cards = [card]
         let history = library.portfolioValues()

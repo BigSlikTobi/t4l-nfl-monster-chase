@@ -33,7 +33,7 @@ class FootballFoilPriceTests(unittest.TestCase):
 
     def row(self, title, **changes):
         self.rows.append(dict(dict(title=title, listing_type="auction", price=1, source="ebay",
-                                   date=dt.date.today().isoformat(), url=f"https://showme.cards/row{len(self.rows)}"),
+                                   date=dt.datetime.now(dt.timezone.utc).date().isoformat(), url=f"https://showme.cards/row{len(self.rows)}"),
                               **changes))
 
     def test_untagged_finish_uses_its_own_decisions_and_never_enters_base(self):

@@ -86,6 +86,14 @@ class Repository:
         if not isinstance(identity, str) or not UUID.fullmatch(identity): raise ValueError("Ungültige Karten-ID.")
         front = image_bytes(payload.get("front")); back = image_bytes(payload["back"]) if payload.get("back") else None
         digest = hashlib.sha256(front + b"\0SIDE\0" + (back or b"")).hexdigest()
+        supplemental = {}
+        for key, filename in (("surfaceFront", "surface.jpg"), ("tiltFront", "tilt.jpg")):
+            if payload.get(key) is not None:
+                photo = image_bytes(payload[key])
+                if len(photo) > 2_000_000: raise ValueError("Zusatzfoto zu groß.")
+                supplemental[filename] = photo
+        if "tilt.jpg" in supplemental:
+            digest = hashlib.sha256(digest.encode() + b"\0TILT\0" + supplemental["tilt.jpg"]).hexdigest()
         refresh_of = payload.get("refreshOf")
         if refresh_of is not None and (not isinstance(refresh_of, str) or not UUID.fullmatch(refresh_of)):
             raise ValueError("Ungültige vorherige Analyse.")
@@ -136,6 +144,8 @@ class Repository:
             folder = self.jobroot / identity; folder.mkdir(exist_ok=True); folder.chmod(0o700)
             (folder / "front.jpg").write_bytes(front)
             if back: (folder / "back.jpg").write_bytes(back)
+            for filename, photo in supplemental.items():
+                (folder / filename).write_bytes(photo)
             if text: (folder / "capture-text.txt").write_text(text, encoding="utf-8")
             if assignment: atomic_json(folder / "identity.json", assignment)
             if refresh_result is not None: atomic_json(folder / "refresh.json", refresh_result)
@@ -168,6 +178,27 @@ class Repository:
     def start_prices(self, analysis):
         if analysis.get("assessmentSource") == "cardsight" and self.defer_direct_prices: return
         self.price_service(analysis).start(analysis)
+    def reviewed_prices(self, source, request):
+        if set(request) != {"cardID", "setID", "variantID", "cachedOnly"} or type(request["cachedOnly"]) is not bool:
+            raise ValueError("Invalid price request")
+        with self.db() as db:
+            row = db.execute("SELECT result FROM jobs WHERE id=? AND status='analyzed'", (source,)).fetchone()
+        if not row or not row["result"]:
+            return None
+        original = json.loads(row["result"])
+        analysis = original["analysis"]
+        identity = analysis.get("cardSightIdentity") or {}
+        variant = request["variantID"]
+        if (analysis.get("assessmentSource") != "cardsight" or identity.get("slabbed")
+                or (identity.get("cardID"), identity.get("setID")) != (request["cardID"], request["setID"])
+                or not any(option["id"] == variant for option in analysis.get("cardSightVariants", []))):
+            raise ValueError("Finish does not match the analyzed card")
+        selected = self.card_lookup.select(original, variant, self.catalog)
+        if not request["cachedOnly"]:
+            self.card_lookup.start(selected["analysis"])
+        priced = self.card_lookup.attach(selected)["analysis"]
+        return dict(id=source, status="analyzed", analysis=priced, priceStatus=self.card_lookup.status(priced))
+
     def get(self, identity):
         with self.db() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identity,)).fetchone()
@@ -233,7 +264,7 @@ class Repository:
             row = db.execute("SELECT status FROM jobs WHERE id=?", (identity,)).fetchone()
             return row is not None and row[0] == "cancelled"
     def cleanup_transport(self, identity):
-        for name in ("front.jpg", "back.jpg", "worker.log", "result.json", "schema.json", "refresh.json", "identity.json", "capture-text.txt", "identification.json", "identity-resolution.json", "retrieval.json"):
+        for name in ("front.jpg", "back.jpg", "surface.jpg", "tilt.jpg", "worker.log", "result.json", "schema.json", "refresh.json", "identity.json", "capture-text.txt", "identification.json", "identity-resolution.json", "retrieval.json"):
             (self.jobroot / identity / name).unlink(missing_ok=True)
     def discard(self, identity):
         with self.lock, self.db() as db:
@@ -288,6 +319,7 @@ class Worker(threading.Thread):
                     # into transport files that can outlive the provider TTL.
                     if self.repo.card_prices_enabled:
                         pending["analysis"]["insights"]["marketReferences"] = []
+                        pending["analysis"]["insights"].pop("scoutEstimate", None)
                         pending["analysis"]["insights"]["marketBullets"] = []
                         pending["analysis"]["insights"]["sourceChecks"] = []
                     atomic_json(self.repo.jobroot / identity / "identification.json", {"analysis": pending["analysis"]})
@@ -388,6 +420,9 @@ def handler(repo, token):
                     if product in PRODUCTS: return self.send(202, repo.market.refresh(product))
                 parts = self.path.strip("/").split("/")
                 if len(parts) == 4 and parts[:2] == ["v1", "jobs"] and UUID.fullmatch(parts[2]):
+                    if parts[3] == "review-prices" and repo.card_prices_enabled:
+                        result = repo.reviewed_prices(parts[2], data)
+                        return self.send(200 if result else 404, result or {"error": "Karte nicht gefunden."})
                     if parts[3] == "prices" and repo.card_prices_enabled:
                         job = repo.get(parts[2])
                         if not job or job["status"] == "cancelled": return self.send(404, {"error": "Karte nicht gefunden."})

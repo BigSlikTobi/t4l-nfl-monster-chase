@@ -55,16 +55,20 @@ public struct CollectionCardValue: Codable, Identifiable, Equatable, Sendable {
     public let isEstimate: Bool
     public let basis: String
     public let checkedAt: String
-    public var isGuide: Bool = false
+    public var isScoutEstimate: Bool? = nil
     public var isCached: Bool = false
     public var isPersonal: Bool = false
     var unpricedBaseExpiresAt: Double? = nil
     public var isUnpricedBase: Bool { unpricedBaseExpiresAt != nil }
-    public var isPortfolioEligible: Bool { !isEstimate || isGuide || isPersonal || isUnpricedBase }
+    var saleQuote: BinderQuote? = nil
+    public var isPortfolioEligible: Bool { isScoutEstimate == true || saleQuote != nil || isPersonal || isUnpricedBase }
+    var quote: BinderQuote {
+        saleQuote ?? BinderQuote(amountCents: lowCents, currency: currency, personal: isPersonal)
+    }
     public var label: String {
         let low = Self.money(lowCents, currency: currency)
         let price = lowCents == highCents ? low : "\(low) – \(Self.money(highCents, currency: currency))"
-        return isEstimate && !isUnpricedBase ? "ca. \(price)" : price
+        return isEstimate && !isUnpricedBase && isScoutEstimate != true ? "ca. \(price)" : price
     }
     public static func money(_ cents: Int, currency: String) -> String {
         (Double(cents) / 100).formatted(.currency(code: currency).locale(ScoutLocalization.locale).precision(.fractionLength(0...2)))
@@ -72,6 +76,27 @@ public struct CollectionCardValue: Codable, Identifiable, Equatable, Sendable {
 }
 
 extension OwnedCard {
+    var personalCollectionValue: CollectionCardValue? {
+        guard let price = personalPrice, price.isValid else { return nil }
+        return CollectionCardValue(cardID: id, currency: price.currency, lowCents: price.amountCents,
+            highCents: price.amountCents, isEstimate: true, basis: "Dein Preis", checkedAt: price.recordedAt, isPersonal: true)
+    }
+
+    func marketValue(asOf: Date, cached: CollectionCardValue?) -> CollectionCardValue? {
+        guard hasCurrentAnalysis, let analysis, analysis.identityConfirmed == true,
+              analysis.knownIdentityConflict == nil else { return nil }
+        if let model = analysis.cardScoutValue(asOf: asOf) {
+            return CollectionCardValue(cardID: id, currency: model.currency, lowCents: model.amountCents,
+                highCents: model.amountCents, isEstimate: true, basis: "Card Scout Value",
+                checkedAt: model.checkedAt, isScoutEstimate: true)
+        }
+        if cached?.isScoutEstimate == true { return cached }
+        if let summary = analysis.insights?.marketSummary(asOf: asOf), let quote = BinderQuote(sales: summary) {
+            return quote.collectionValue(for: self, checkedAt: summary.primary.checkedAt)
+        }
+        return cached?.saleQuote == nil ? nil : cached
+    }
+
     public func unpricedBaseValue(asOf: Date = Date()) -> CollectionCardValue? {
         guard hasCurrentAnalysis, let analysis, analysis.hasUnpricedBaseAllowance(asOf: asOf) else { return nil }
         return CollectionCardValue(cardID: id, currency: "EUR", lowCents: 0, highCents: 0,
@@ -87,6 +112,7 @@ public struct CollectionGrowthPoint: Identifiable, Sendable {
 }
 
 public struct CollectionStatistics: Sendable {
+    let removedCardIDs: Set<String>
     public let totalCards: Int
     public let analyzedCards: Int
     public let rookieCards: Int
@@ -100,7 +126,7 @@ public struct CollectionStatistics: Sendable {
     public let specialCardID: String?
     public let specialReason: String?
     public let growth: [CollectionGrowthPoint]
-    public var pricedCards: Int { values.filter { !$0.isEstimate }.count }
+    public var pricedCards: Int { values.filter { !$0.isUnpricedBase }.count }
     public var indicativeCards: Int { values.filter { $0.isEstimate && !$0.isUnpricedBase }.count }
     public var nextMilestone: Int { [10, 25, 50, 100, 250, 500, 1000].first { $0 > totalCards } ?? ((totalCards / 1000) + 1) * 1000 }
     public var spendingCurrencies: [String] { Array(Set(purchases.map(\.currency))).sorted() }
@@ -113,21 +139,21 @@ public struct CollectionStatistics: Sendable {
         guard !matching.isEmpty else { return nil }
         return (matching.reduce(0) { $0 + $1.lowCents }, matching.reduce(0) { $0 + $1.highCents })
     }
-    /// Indicative collection total, including comparison medians. Unknown values are not invented.
+    /// Sum the effective values and explicit collection allowances.
     public func estimatedCollectionValue(currency: String) -> (low: Int, high: Int)? {
         let matching = values.filter { $0.currency == currency }
         guard !matching.isEmpty else { return nil }
         return (matching.reduce(0) { $0 + $1.lowCents }, matching.reduce(0) { $0 + $1.highCents })
     }
     public func ranked(currency: String) -> [CollectionCardValue] {
-        values.filter { $0.currency == currency }.sorted {
-            if $0.isEstimate != $1.isEstimate { return !$0.isEstimate }
+        values.filter { $0.currency == currency && !$0.isUnpricedBase }.sorted {
             if $0.lowCents != $1.lowCents { return $0.lowCents > $1.lowCents }
             return $0.cardID < $1.cardID
         }
     }
     public init(library: Library, asOf: Date = Date(), calendar: Calendar = .current, cachedValues: [CollectionCardValue] = [], includePersonal: Bool = true) {
         let cards = library.collectedCards
+        removedCardIDs = library.removedCardIDs
         let analyzed = cards.filter(\.hasCurrentAnalysis)
         let readable = analyzed.filter { $0.analysis?.player != nil && $0.analysis?.confidence != "low" }
         totalCards = cards.count; analyzedCards = analyzed.count
@@ -144,17 +170,11 @@ public struct CollectionStatistics: Sendable {
         purchases = (library.purchases ?? []).filter { $0.isValid && $0.purchasedOn <= purchaseDate.string(from: asOf) }.sorted {
             $0.purchasedOn == $1.purchasedOn ? $0.id > $1.id : $0.purchasedOn > $1.purchasedOn
         }
-        personalValues = cards.compactMap { card in
-            guard let price = card.personalPrice, price.isValid else { return nil }
-            return CollectionCardValue(cardID: card.id, currency: price.currency, lowCents: price.amountCents,
-                highCents: price.amountCents, isEstimate: true, basis: "Dein Preis", checkedAt: price.recordedAt, isPersonal: true)
+        personalValues = cards.compactMap(\.personalCollectionValue)
+        let cached = Dictionary(cachedValues.map { ($0.cardID, $0) }, uniquingKeysWith: { first, _ in first })
+        let accounted = analyzed.compactMap { card in
+            card.marketValue(asOf: asOf, cached: cached[card.id]) ?? card.unpricedBaseValue(asOf: asOf)
         }
-        let currentValues = analyzed.compactMap { Self.cardValue($0, asOf: asOf) }
-        let currentIDs = Set(currentValues.map(\.cardID))
-        let analyzedIDs = Set(analyzed.map(\.id))
-        let researched = currentValues + cachedValues.filter { !$0.isUnpricedBase && !currentIDs.contains($0.cardID) && analyzedIDs.contains($0.cardID) }
-        let researchedIDs = Set(researched.map(\.cardID))
-        let accounted = researched + analyzed.compactMap { researchedIDs.contains($0.id) ? nil : $0.unpricedBaseValue(asOf: asOf) }
         let personalIDs = Set(personalValues.map(\.cardID))
         values = includePersonal ? personalValues + accounted.filter { !personalIDs.contains($0.cardID) } : accounted
         let special = readable.compactMap { card -> (OwnedCard, Int, String)? in
@@ -184,72 +204,5 @@ public struct CollectionStatistics: Sendable {
         guard parts.count == 2, let number = Int(parts[0]), let limit = Int(parts[1]),
               number >= 1, number <= limit, limit <= 1_000_000 else { return nil }
         return limit
-    }
-    private static func cardValue(_ card: OwnedCard, asOf: Date) -> CollectionCardValue? {
-        guard let analysis = card.analysis, analysis.knownIdentityConflict == nil else { return nil }
-        guard var info = analysis.insights else {
-            if analysis.identityConfirmed == true, let low = analysis.marketLowCents, let high = analysis.marketHighCents, low > 0, high >= low {
-                return CollectionCardValue(cardID: card.id, currency: analysis.currency ?? "EUR", lowCents: low, highCents: high,
-                    isEstimate: false, basis: "Gespeicherte Preisspanne", checkedAt: analysis.marketCheckedAt)
-            }
-            return nil
-        }
-        var seenReferences = Set<String>()
-        info.marketReferences = info.marketReferences.filter { reference in
-            guard reference.isFresh(asOf: asOf) else { return false }
-            guard reference.kind == "sold" else { return true }
-            let url = reference.listingURL ?? reference.url
-            let path = URLComponents(string: url)?.path ?? url
-            let matcher = try! NSRegularExpression(pattern: "/itm/(?:[^/]+/)?([0-9]{9,15})(?:/|$)")
-            let match = matcher.firstMatch(in: path, range: NSRange(path.startIndex..., in: path))
-            let key: String
-            if let match, let range = Range(match.range(at: 1), in: path) { key = "ebay:" + path[range] }
-            else { key = "\(url)|\(reference.saleDate ?? "")|\(reference.lowCents)|\(reference.currency)|\(reference.shipping)" }
-            return seenReferences.insert(key).inserted
-        }
-        if let summary = info.valuationSummary(asOf: asOf) ?? analysis.comparableEstimate?.marketSummary(asOf: asOf), analysis.identityConfirmed == true {
-            let low = summary.isGuide ? summary.primary.lowCents : Int(summary.orderingValueCents.rounded())
-            return CollectionCardValue(cardID: card.id, currency: summary.primary.currency, lowCents: low,
-                highCents: summary.isGuide ? summary.primary.highCents : low, isEstimate: summary.isEstimate,
-                basis: summary.basisLabel, checkedAt: summary.references.map(\.checkedAt).min() ?? analysis.marketCheckedAt, isGuide: summary.isGuide)
-        }
-        guard analysis.player != nil, analysis.confidence != "low" else { return nil }
-        let raw = info.marketReferences.filter { $0.grade == "raw" && ["exact", "near"].contains($0.matchQuality) && $0.lowCents > 0 && $0.highCents >= $0.lowCents }
-        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.dateFormat = "yyyy-MM-dd"; formatter.isLenient = false
-        let today = formatter.date(from: formatter.string(from: asOf)) ?? asOf
-        var seen = Set<String>()
-        let sales = raw.filter { reference in
-            guard reference.kind == "sold", reference.lowCents == reference.highCents,
-                  let text = reference.saleDate, let date = formatter.date(from: text), formatter.string(from: date) == text else { return false }
-            let age = today.timeIntervalSince(date) / 86400
-            guard age >= 0, age <= 365 else { return false }
-            let key = reference.listingURL.map { URLComponents(string: $0).map { ($0.host ?? "") + $0.path } ?? $0 }
-                ?? "\(reference.url)|\(text)|\(reference.lowCents)|\(reference.currency)|\(reference.shipping)"
-            return seen.insert(key).inserted
-        }
-        let recent = sales.filter { today.timeIntervalSince(formatter.date(from: $0.saleDate!)!) / 86400 <= 90 }
-        func bestGroup(_ refs: [MarketReference]) -> [MarketReference]? {
-            let groups: [String: [MarketReference]] = Dictionary(grouping: refs) { "\($0.currency)|\($0.shipping)" }
-            let sorted: [[MarketReference]] = groups.values.sorted { left, right in
-                if left.count != right.count { return left.count > right.count }
-                let leftKey = (left.first?.currency ?? "") + (left.first?.shipping ?? "")
-                let rightKey = (right.first?.currency ?? "") + (right.first?.shipping ?? "")
-                return leftKey < rightKey
-            }
-            return sorted.first
-        }
-        let group = bestGroup(recent).flatMap { $0.count >= 2 ? $0 : nil } ?? bestGroup(sales)
-        if let group, !group.isEmpty {
-            let median = Int(RawMarketSummary(references: group).orderingValueCents.rounded())
-            return CollectionCardValue(cardID: card.id, currency: group[0].currency, lowCents: median, highCents: median,
-                isEstimate: true, basis: group.count == 1 ? "Ähnliche Karte · Einzelverkauf" : "Median · \(group.count) Vergleichsverkäufe",
-                checkedAt: group.map(\.checkedAt).min() ?? analysis.marketCheckedAt)
-        }
-        if let guide = raw.filter({ $0.kind == "guide" }).sorted(by: { $0.checkedAt > $1.checkedAt }).first {
-            return CollectionCardValue(cardID: card.id, currency: guide.currency, lowCents: guide.lowCents, highCents: guide.highCents,
-                isEstimate: true, basis: "Vergleichsrichtwert", checkedAt: guide.checkedAt)
-        }
-        return nil
     }
 }

@@ -143,7 +143,7 @@ private struct ProbeView: View {
             let host = UIHostingController(rootView: ProbeView(probe: probe).environment(\.imagePipeline, pipeline))
             let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first!
             let window = UIWindow(windowScene: scene); window.frame = scene.coordinateSpace.bounds
-            func snapshot(_ name: String) {
+            @discardableResult func snapshot(_ name: String) -> UIImage {
                 window.layoutIfNeeded()
                 let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
                     window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
@@ -151,6 +151,7 @@ private struct ProbeView: View {
                 let target = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                     .appendingPathComponent(name + ".png")
                 try? image.pngData()?.write(to: target)
+                return image
             }
             window.rootViewController = host; window.makeKeyAndVisible()
             try await waitUntil { probe.image != nil && !probe.loading }
@@ -279,6 +280,35 @@ private struct ProbeView: View {
             try require(FixtureURLProtocol.count(wrappersURL) == 1, "Reference and tile wrappers did not share stable loading")
             snapshot("centralized-image-wrappers")
             checks.append("Reference, Chase/Lookout tile and owned-photo wrappers share the centralized lifecycle")
+
+            let assessment = #"{"recommendation":"Keep","marketCheckedAt":"","marketSources":[],"confidence":"high","conditionNotes":"","rationale":"","needsReview":true}"#
+            var open = try JSONDecoder().decode(CardAnalysis.self, from: Data(assessment.utf8))
+            open.year = 2026; open.brand = "Topps"; open.setName = "Topps Flagship"; open.subset = "Base"
+            open.player = "Fixture Player"; open.cardNumber = "17"
+            open.identityConfirmed = false; open.finishPolicy = "catalog-photo-v1"; open.finishState = "pending"
+            open.cardSightIdentity = CardSightIdentity(cardID: UUID().uuidString, setID: UUID().uuidString)
+            let finishCard = OwnedCard(state: "analyzed", frontFile: front, backFile: back, analysis: open)
+            let libraryBeforeShelf = store.library
+            store.library.cards.append(finishCard)
+            guard let binder = store.library.binders.first(where: { $0.product == .flagship }) else {
+                throw CheckFailure("Open card did not appear in its product binder")
+            }
+            let shelf = UIHostingController(rootView: NavigationStack {
+                VStack { BinderOpenFinishShelf(binder: binder); Spacer() }.padding(12)
+            }.environment(store).environment(\.imagePipeline, pipeline))
+            window.rootViewController = shelf; window.makeKeyAndVisible()
+            try await Task.sleep(for: .milliseconds(400))
+            let shelfImage = snapshot("binder-open-finish-photo")
+            var visibleTile = false
+            for x in [0.12, 0.20] {
+                for y in [0.16, 0.20, 0.24, 0.28] {
+                    let color = try pixel(shelfImage, x: x, y: 1 - y)
+                    visibleTile = visibleTile || (color[0] > 200 && color[1] < 65 && color[2] < 65)
+                }
+            }
+            try require(visibleTile, "The saved open finish was not visible as a photo on the binder shelf")
+            checks.append("An unresolved finish renders the saved photo directly on the binder shelf")
+            store.library = libraryBeforeShelf
 
             store.library = try disk.addCaptures([CapturePhoto(front: red, back: blue)], sessionID: prefix, to: store.library)
             let card = store.library.cards.first!

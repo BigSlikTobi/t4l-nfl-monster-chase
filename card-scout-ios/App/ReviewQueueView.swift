@@ -5,8 +5,9 @@ struct ReviewQueueView: View {
     @Environment(AppStore.self) private var store
     @State private var reviewing: OwnedCard?
     private var identityCards: [OwnedCard] { store.library.collectedCards.filter { ReviewIssue.identity($0) != nil } }
+    private var tiltCards: [OwnedCard] { store.library.collectedCards.filter(\.canAddTilt) }
     private var unpriced: [OwnedCard] {
-        store.library.collectedCards.filter { $0.hasCurrentAnalysis && ReviewIssue.identity($0) == nil && $0.analysis?.marketSummary == nil && $0.analysis?.askingSummary == nil && $0.unpricedBaseValue() == nil }
+        store.library.collectedCards.filter { $0.hasCurrentAnalysis && ($0.automaticScan != true || $0.analysis?.identityConfirmed == true) && ReviewIssue.identity($0) == nil && store.dashboardValueCache.binderQuote(for: $0) == nil && $0.unpricedBaseValue() == nil }
     }
     var body: some View {
         List {
@@ -18,6 +19,13 @@ struct ReviewQueueView: View {
                     Button { store.selectedTab = 3 } label: {
                         row(pair, title: tr("Gespeicherte Vorderseite · Rückseite fehlt"),
                             detail: "Unter Scannen dieselbe Karte umdrehen. Keine neue Karte beginnen.")
+                    }
+                }
+            }
+            if !tiltCards.isEmpty {
+                Section(tr("Tilt the card slightly")) {
+                    ForEach(tiltCards) { card in
+                        NavigationLink { CardDetailView(cardID: card.id) } label: { Text(card.title) }
                     }
                 }
             }
@@ -40,7 +48,7 @@ struct ReviewQueueView: View {
                     }
                 }
             }
-            if identityCards.isEmpty && unpriced.isEmpty && store.pendingCapturePair == nil {
+            if tiltCards.isEmpty && identityCards.isEmpty && unpriced.isEmpty && store.pendingCapturePair == nil {
                 Label(tr("Keine offenen Schritte"), systemImage: "checkmark.circle")
             }
         }.navigationTitle(tr("Nächste Schritte"))

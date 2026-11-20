@@ -10,6 +10,8 @@ public struct PortfolioCardValue: Codable, Equatable, Sendable {
     public let lowCents: Int
     public let highCents: Int
     public var midpointCents: Double { (Double(lowCents) + Double(highCents)) / 2 }
+    var isMarketValue: Bool { isScoutValue || comparisonKey.hasPrefix("exact-sale|") }
+    var isScoutValue: Bool { comparisonKey.hasPrefix("scout-estimate|") }
 }
 
 public struct PortfolioObservation: Codable, Identifiable, Equatable, Sendable {
@@ -17,11 +19,20 @@ public struct PortfolioObservation: Codable, Identifiable, Equatable, Sendable {
     public let observedAt: Date
     public let totalCards: Int
     public let values: [PortfolioCardValue]
-    public func values(currency: String) -> [PortfolioCardValue] { values.filter { $0.currency == currency } }
+    public var displayedValues: [PortfolioCardValue] {
+        values.filter { $0.isMarketValue || ["personal", "unpriced-base"].contains($0.comparisonKey) }
+    }
+    public func values(currency: String) -> [PortfolioCardValue] { displayedValues.filter { $0.currency == currency } }
     public func midpoint(currency: String) -> Double { values(currency: currency).reduce(0) { $0 + $1.midpointCents } }
 }
 
+public struct PortfolioCardMove: Sendable {
+    public let cardID: String
+    public let deltaCents: Double
+}
+
 public struct PortfolioChange: Sendable {
+    public let largestMove: PortfolioCardMove?
     public let from: Date
     public let matchedCards: Int
     public let previousCents: Double
@@ -30,30 +41,43 @@ public struct PortfolioChange: Sendable {
     public var percentage: Double? { previousCents > 0 ? deltaCents / previousCents : nil }
 }
 
+extension OwnedCard {
+    var portfolioIdentityKey: String? {
+        guard let a = analysis else { return nil }
+        return [a.collectionID, a.player, a.year.map(String.init), a.brand, a.setName, a.subset, a.parallel, a.cardNumber, a.serialNumber]
+            .map { ($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.joined(separator: "\u{1f}")
+    }
+}
+
+extension CollectionCardValue {
+    func portfolioValue(for card: OwnedCard, asOf: Date) -> PortfolioCardValue? {
+        let key: String
+        if isPersonal { key = "personal" }
+        else if isUnpricedBase { key = "unpriced-base" }
+        else if let quote = saleQuote { key = "exact-sale|" + (quote.shipping ?? "unknown") }
+        else if isScoutEstimate == true, let model = card.analysis?.cardScoutValue(asOf: asOf) { key = "scout-estimate|" + model.shipping }
+        else { return nil }
+        guard let identity = isPersonal ? card.id : card.portfolioIdentityKey else { return nil }
+        return PortfolioCardValue(cardID: card.id, identityKey: identity, comparisonKey: key, currency: currency,
+            lowCents: lowCents, highCents: highCents)
+    }
+}
+
 extension Library {
     public func portfolioValues(asOf: Date = Date(), cachedValues: [PortfolioCardValue] = []) -> [PortfolioCardValue] {
-        let prices = CollectionStatistics(library: self, asOf: asOf).values.filter(\.isPortfolioEligible)
-        let cachedResearch = cachedValues.filter { $0.comparisonKey != "unpriced-base" }
-        let cachedIDs = Set(cachedResearch.map(\.cardID))
-        let current = prices.compactMap { price -> PortfolioCardValue? in
-            if price.isUnpricedBase && cachedIDs.contains(price.cardID) { return nil }
-            guard let card = collectedCards.first(where: { $0.id == price.cardID }) else { return nil }
-            if price.isPersonal {
-                return PortfolioCardValue(cardID: card.id, identityKey: card.id, comparisonKey: "personal", currency: price.currency, lowCents: price.lowCents, highCents: price.highCents)
-            }
-            guard let a = card.analysis else { return nil }
-            let identity = [a.collectionID, a.player, a.year.map(String.init), a.brand, a.setName, a.subset, a.parallel, a.cardNumber, a.serialNumber]
-                .map { ($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.joined(separator: "\u{1f}")
-            let summary = a.insights?.valuationSummary(asOf: asOf)
-            let basis = price.isUnpricedBase ? "unpriced-base" :
-                summary.map { ($0.isAsking ? "ask" : $0.isGuide ? "guide" : "sold") + "|" + $0.primary.shipping } ?? "legacy-range"
-            return PortfolioCardValue(cardID: card.id, identityKey: identity, comparisonKey: basis, currency: price.currency,
-                lowCents: price.lowCents, highCents: price.highCents)
+        let cards = Dictionary(collectedCards.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let cached = Dictionary(cachedValues.filter { value in
+            guard let card = cards[value.cardID], card.hasCurrentAnalysis, card.analysis?.identityConfirmed == true,
+                  card.analysis?.knownIdentityConflict == nil else { return false }
+            return value.isMarketValue && value.identityKey == card.portfolioIdentityKey
+        }.map { ($0.cardID, $0) }, uniquingKeysWith: { first, _ in first })
+        var result = cached
+        for price in CollectionStatistics(library: self, asOf: asOf).values {
+            guard let card = cards[price.cardID] else { continue }
+            if let stored = cached[card.id], price.isUnpricedBase || (price.saleQuote != nil && stored.isScoutValue) { continue }
+            if let current = price.portfolioValue(for: card, asOf: asOf) { result[card.id] = current }
         }
-        let currentIDs = Set(current.map(\.cardID))
-        let ownedIDs = Set(collectedCards.map(\.id))
-        return (current + cachedResearch.filter { !currentIDs.contains($0.cardID) && ownedIDs.contains($0.cardID) })
-            .sorted { $0.cardID < $1.cardID }
+        return result.values.sorted { $0.cardID < $1.cardID }
     }
 
     /// Keep the initial baseline, then at most two observations per UTC day.
@@ -80,15 +104,22 @@ extension Library {
     /// Additions, removals, corrected identities and missing prices cannot create a gain.
     public func portfolioChange(currency: String, asOf: Date = Date(), cachedValues: [PortfolioCardValue] = []) -> PortfolioChange? {
         let current = portfolioValues(asOf: asOf, cachedValues: cachedValues).filter { $0.currency == currency }
-        let comparable = current.filter { !["legacy-range", "personal", "unpriced-base"].contains($0.comparisonKey) }
+        let comparable = current.filter(\.isMarketValue)
         for observation in portfolioHistory ?? [] where observation.observedAt <= asOf {
-            let old = observation.values(currency: currency)
+            let old = Dictionary(grouping: observation.values(currency: currency), by: \.cardID)
             let pairs = comparable.compactMap { value -> (PortfolioCardValue, PortfolioCardValue)? in
-                old.first { $0.cardID == value.cardID && $0.identityKey == value.identityKey && $0.comparisonKey == value.comparisonKey }
+                old[value.cardID]?.first { $0.identityKey == value.identityKey && $0.comparisonKey == value.comparisonKey }
                     .map { ($0, value) }
             }
             if !pairs.isEmpty {
-                return PortfolioChange(from: observation.observedAt, matchedCards: pairs.count,
+                var mover: PortfolioCardMove?
+                for (old, latest) in pairs {
+                    let delta = latest.midpointCents - old.midpointCents
+                    if abs(delta) > abs(mover?.deltaCents ?? 0) {
+                        mover = PortfolioCardMove(cardID: latest.cardID, deltaCents: delta)
+                    }
+                }
+                return PortfolioChange(largestMove: mover, from: observation.observedAt, matchedCards: pairs.count,
                     previousCents: pairs.reduce(0) { $0 + $1.0.midpointCents }, currentCents: pairs.reduce(0) { $0 + $1.1.midpointCents })
             }
         }

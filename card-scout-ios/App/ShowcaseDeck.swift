@@ -183,7 +183,7 @@ struct ShowcaseDeck: View {
     }
 }
 
-private struct ShowcaseFlippingCard: View, Animatable {
+struct ShowcaseFlippingCard: View, Animatable {
     let card: OwnedCard
     var angle: Double
     var light: CGSize
@@ -203,7 +203,7 @@ private struct ShowcaseFlippingCard: View, Animatable {
     }
 }
 
-private struct ShowcaseDeckSurface: View {
+struct ShowcaseDeckSurface: View {
     let card: OwnedCard
     let back: Bool
     var light = CGSize.zero

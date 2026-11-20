@@ -37,7 +37,7 @@ extension DiskStore {
         var updated = library
         var card = OwnedCard(state: "awaiting_back")
         card.frontFile = card.id + "-front.jpg"; card.isScanDraft = true; card.awaitingBack = true
-        card.fastPipeline = true; card.captureSessionID = sessionID
+        card.automaticScan = true; card.fastPipeline = true; card.captureSessionID = sessionID
         card.captureMode = mode.rawValue
         card.captureText = capture.text.map { String($0.prefix(1000)) }
         card.requestedAnalysisVersion = OwnedCard.currentAnalysisVersion
@@ -47,6 +47,24 @@ extension DiskStore {
             return updated
         } catch {
             if let url = try? photoURL(card.frontFile) { try? FileManager.default.removeItem(at: url) }
+            throw error
+        }
+    }
+
+    /// A retake while the front is still waiting for its back must not start analysis.
+    public func replacePendingFront(cardID: String, with capture: CapturePhoto, in library: Library) throws -> Library {
+        guard let i = library.cards.firstIndex(where: { $0.id == cardID && $0.awaitingBack == true }),
+              !capture.front.isEmpty, capture.back == nil else { throw StoreError.invalidResult }
+        let name = cardID + "-retaken-front-" + UUID().uuidString.lowercased() + ".jpg"
+        var updated = library
+        updated.cards[i].frontFile = name
+        updated.cards[i].captureText = capture.text.map { String($0.prefix(1000)) }
+        do {
+            try writePhoto(capture.front, name: name)
+            try save(updated)
+            return updated
+        } catch {
+            if let url = try? photoURL(name) { try? FileManager.default.removeItem(at: url) }
             throw error
         }
     }
@@ -87,7 +105,7 @@ extension DiskStore {
             for capture in captures {
                 var card = OwnedCard()
                 card.isScanDraft = asDraft ? true : nil
-                card.fastPipeline = true; card.captureSessionID = sessionID
+                card.automaticScan = true; card.fastPipeline = true; card.captureSessionID = sessionID
                 card.captureText = capture.text.map { String($0.prefix(2000)) }
                 card.requestedAnalysisVersion = OwnedCard.currentAnalysisVersion
                 card.frontFile = card.id + "-front.jpg"

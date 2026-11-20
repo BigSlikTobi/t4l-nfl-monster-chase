@@ -88,30 +88,24 @@ final class MacClient: @unchecked Sendable {
     func submit(_ card: OwnedCard, disk: DiskStore, fastSupported: Bool = false, matchSupported: Bool = false) async throws -> MacJob {
         // File I/O, image decoding and base64 encoding stay off the UI thread.
         let data = try await Task.detached(priority: .utility) {
-            func transport(_ file: String) throws -> Data {
-                let original = try Data(contentsOf: disk.photoURL(file))
-                // Use the same deterministic derivative on every upload and refresh.
-                // Originals stay on the phone; the Mac's digest remains stable.
-                guard card.fastPipeline == true,
-                      let source = CGImageSourceCreateWithData(original as CFData, nil),
-                      let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                        kCGImageSourceCreateThumbnailFromImageAlways: true,
-                        kCGImageSourceCreateThumbnailWithTransform: true,
-                        kCGImageSourceThumbnailMaxPixelSize: 1800
-                      ] as CFDictionary) else { return original }
-                let encoded = NSMutableData()
-                guard let destination = CGImageDestinationCreateWithData(encoded, UTType.jpeg.identifier as CFString, 1, nil) else { return original }
-                CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.86] as CFDictionary)
-                return CGImageDestinationFinalize(destination) ? encoded as Data : original
+            func read(_ file: String) throws -> Data { try Data(contentsOf: disk.photoURL(file)) }
+            func transport(_ file: String) throws -> Data { ScanEvidencePhotos.front(try read(file), fast: card.fastPipeline == true) }
+            let original = try read(card.frontFile)
+            var body: [String: Any] = ["id": card.jobID, "front": ScanEvidencePhotos.front(original, fast: card.fastPipeline == true).base64EncodedString()]
+            if card.refreshOfJobID == nil, let crop = ScanEvidencePhotos.surface(original) {
+                body["surfaceFront"] = crop.base64EncodedString()
             }
-            var body: [String: Any] = ["id": card.jobID, "front": try transport(card.frontFile).base64EncodedString()]
+            if let file = card.tiltFile {
+                guard let angle = ScanEvidencePhotos.angle(try read(file)) else { throw StoreError.invalidResult }
+                body["tiltFront"] = angle.base64EncodedString()
+            }
             if let previous = card.refreshOfJobID { body["refreshOf"] = previous }
             if let variant = card.requestedVariantID { body["variantID"] = variant }
             if let file = card.backFile { body["back"] = try transport(file).base64EncodedString() }
             if fastSupported && card.fastPipeline != false { body["pipeline"] = "fast" }
-            if matchSupported && card.isScanDraft == true { body["pipeline"] = "match" }
-            if let text = card.captureText { body["captureText"] = text }
-            if card.requestedVariantID == nil, card.manualAssignment == true, let collectionID = card.analysis?.collectionID, let number = card.analysis?.cardNumber {
+            if matchSupported && card.isScanDraft == true && card.automaticScan != true { body["pipeline"] = "match" }
+            if let text = card.analysisTextWithReadings { body["captureText"] = text }
+            if card.photoRecheck != true, card.requestedVariantID == nil, card.manualAssignment == true, let collectionID = card.analysis?.collectionID, let number = card.analysis?.cardNumber {
                 body["assignment"] = ["collectionID": collectionID, "number": number]
             }
             return try JSONSerialization.data(withJSONObject: body)
@@ -127,6 +121,22 @@ final class MacClient: @unchecked Sendable {
             let analysis = prior?.id == previous && prior?.status == "analyzed" ? prior?.analysis : nil
             throw RejectedVariantSubmission(message: error.localizedDescription, previousAnalysis: analysis)
         }
+    }
+}
+
+extension MacClient {
+    func priceJob(for card: OwnedCard, cachedOnly: Bool) async throws -> MacJob {
+        if card.analysis?.assessmentSource == "photoReview" {
+            guard let source = card.uploadedJobID, UUID(uuidString: source) != nil,
+                  let id = card.analysis?.cardSightIdentity, !id.slabbed,
+                  card.analysis?.identityConfirmed == true else { throw StoreError.invalidResult }
+            let payload: [String: Any] = ["cardID": id.cardID, "setID": id.setID,
+                "variantID": id.parallelID ?? "base", "cachedOnly": cachedOnly]
+            return try await request("/v1/jobs/\(source)/review-prices", method: "POST",
+                                     body: JSONSerialization.data(withJSONObject: payload))
+        }
+        if cachedOnly { return try await request("/v1/jobs/\(card.jobID)") }
+        return try await request("/v1/jobs/\(card.jobID)/prices", method: "POST", body: Data("{}".utf8))
     }
 }
 

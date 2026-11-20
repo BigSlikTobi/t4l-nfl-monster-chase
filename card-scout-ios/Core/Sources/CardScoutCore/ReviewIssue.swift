@@ -12,6 +12,7 @@ public struct ReviewIssue: Sendable {
                          detail: "Die Vorderseite ist gespeichert. Erst das Fotopaar startet die Suche.")
         }
         guard !card.isAwaitingAnalysis else { return nil }
+        if card.state != "failed", card.automaticScan == true || card.analysis?.finishPolicy != nil { return nil }
         if let reason = card.analysis?.knownIdentityConflict {
             return .init(kind: .conflict, title: "Zuordnung widerspricht der Checkliste", detail: reason)
         }

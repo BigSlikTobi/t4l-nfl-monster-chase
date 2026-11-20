@@ -41,18 +41,18 @@ final class CollectionStatisticsTests: XCTestCase {
         purchase.purchasedOn = "2026-10-17"
         XCTAssertTrue(stats(purchases: [purchase]).purchases.isEmpty)
     }
-    func testConfirmedMedianValuesAndMissingPricesStayDistinct() {
-        let snapshot = stats(cards: [card("a", refs: [reference(100), reference(200), reference(900)]), card("b")])
-        XCTAssertEqual(snapshot.confirmedValue(currency: "USD")?.low, 200)
+    func testCollectionUsesTheModeledValueAlongsideUnknownCards() {
+        var priced = card("a", refs: [reference(100), reference(200), reference(900)])
+        priced.analysis?.setFixtureScoutValue(175, currency: "USD", asOf: today)
+        let snapshot = stats(cards: [priced, card("b")])
+        XCTAssertEqual(snapshot.estimatedCollectionValue(currency: "USD")?.low, 175)
         XCTAssertEqual(snapshot.pricedCards, 1)
         XCTAssertEqual(snapshot.totalCards, 2)
         XCTAssertNil(stats(cards: [card("b")]).confirmedValue(currency: "USD"))
     }
-    func testUncertainVariantUsesMedianAsSeparateIndicatorOnly() {
+    func testUncertainVariantAndNearSalesStayUnpriced() {
         let snapshot = stats(cards: [card("pitts", refs: [reference(150, match: "near"), reference(179, match: "near"), reference(199, match: "near")], confirmed: false)])
-        XCTAssertEqual(snapshot.values.first?.lowCents, 179)
-        XCTAssertEqual(snapshot.values.first?.basis, "Median · 3 Vergleichsverkäufe")
-        XCTAssertEqual(snapshot.indicativeCards, 1)
+        XCTAssertTrue(snapshot.values.isEmpty)
         XCTAssertEqual(snapshot.pricedCards, 0)
         XCTAssertNil(snapshot.confirmedValue(currency: "USD"))
     }
@@ -84,15 +84,18 @@ final class CollectionStatisticsTests: XCTestCase {
         XCTAssertTrue(library.portfolioValues(asOf: today.addingTimeInterval(601), cachedValues: saved).isEmpty)
     }
 
-    func testDollarAskingBaselineCountsEuroBaseZeroOnce() {
+    func testDollarCardScoutValueCountsEuroBaseZeroOnce() {
         var ask = reference(300)
         ask.kind = "ask"
         var priced = card("priced")
         priced.analysis?.insights?.marketReferences = [ask]
+        priced.analysis?.setFixtureScoutValue(250, currency: "USD", shipping: ask.shipping, asOf: today)
         var library = Library()
         library.cards = [priced, verifiedUnpricedBase(), card("unknown")]
-        let burn = BurnCount(statistics: CollectionStatistics(library: library, asOf: today), currency: "USD")
-        XCTAssertEqual(burn.valueLowCents, 300)
+        let stats = CollectionStatistics(library: library, asOf: today)
+        let burn = BurnCount(statistics: stats, currency: "USD")
+        XCTAssertNil(BurnCount(statistics: stats, currency: "EUR").valueLowCents)
+        XCTAssertEqual(burn.valueLowCents, 250)
         XCTAssertEqual(burn.pricedCards, 2)
         XCTAssertEqual(burn.totalCards, 3)
     }
@@ -120,13 +123,13 @@ final class CollectionStatisticsTests: XCTestCase {
         var ask = reference(500); ask.kind = "ask"
         var listed = base; listed.analysis?.insights?.marketReferences = [ask]
         XCTAssertNil(listed.unpricedBaseValue(asOf: today))
-        XCTAssertEqual(stats(cards: [listed]).values.first?.lowCents, 500)
+        XCTAssertNil(stats(cards: [listed]).values.first)
     }
 
     func testResearchCachedValuesAndManualPricesTakePriorityOverBaseZero() throws {
         let base = verifiedUnpricedBase()
         var priced = base
-        priced.analysis?.insights?.marketReferences = [reference(500, currency: "USD")]
+        priced.analysis?.setFixtureScoutValue(500, currency: "USD", asOf: today)
         let amount = try XCTUnwrap(stats(cards: [priced]).values.first)
         XCTAssertEqual(amount.lowCents, 500)
         var library = Library(); library.cards = [base]
@@ -144,11 +147,11 @@ final class CollectionStatisticsTests: XCTestCase {
         var base = verifiedUnpricedBase()
         var library = Library(); library.cards = [base]
         XCTAssertTrue(library.recordPortfolioObservation(asOf: today))
-        library.cards[0].analysis?.insights?.marketReferences = [reference(500, currency: "EUR")]
+        library.cards[0].analysis?.setFixtureScoutValue(500, asOf: today)
         let later = today.addingTimeInterval(60)
         XCTAssertNil(library.portfolioChange(currency: "EUR", asOf: later))
         XCTAssertTrue(library.recordPortfolioObservation(asOf: later))
-        library.cards[0].analysis?.insights?.marketReferences = [reference(600, currency: "EUR")]
+        library.cards[0].analysis?.setFixtureScoutValue(600, asOf: today)
         XCTAssertEqual(library.portfolioChange(currency: "EUR", asOf: today.addingTimeInterval(120))?.deltaCents, 100)
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -165,29 +168,6 @@ final class CollectionStatisticsTests: XCTestCase {
         XCTAssertEqual(restored.cards, library.cards)
         XCTAssertTrue(restored.cards[0].unpricedBaseValue(asOf: now)?.isUnpricedBase == true)
         XCTAssertEqual(try Data(contentsOf: disk.photoURL(base.frontFile)), photo)
-    }
-    func testDuplicateSaleAcrossProvidersIsCountedOnce() {
-        let a = reference(100, match: "near", item: "https://www.ebay.com/itm/123456789012?tracking=x")
-        var same = a; same.provider = "eBay"; same.listingURL = "https://www.ebay.de/itm/123456789012"
-        let b = reference(300, match: "near", item: "https://www.ebay.com/itm/123456789013")
-        XCTAssertEqual(stats(cards: [card("a", refs: [a, same, b], confirmed: false)]).values.first?.lowCents, 200)
-    }
-    func testUncertainVariantMedianResistsOneExpensiveSale() {
-        let refs = [100, 100, 100, 800].enumerated().map { index, amount in
-            reference(amount, match: "near", item: "https://www.ebay.com/itm/12345678901\(index)")
-        }
-        let snapshot = stats(cards: [card("a", refs: refs, confirmed: false)])
-        XCTAssertEqual(snapshot.values.first?.lowCents, 100)
-        XCTAssertEqual(snapshot.values.first?.highCents, 100)
-        XCTAssertEqual(snapshot.values.first?.basis, "Median · 4 Vergleichsverkäufe")
-        XCTAssertNil(snapshot.confirmedValue(currency: "USD"))
-    }
-    func testEstimatesNeverMixShippingCurrencyGradeOrProxyMatches() {
-        var graded = reference(90000, match: "near"); graded.grade = "PSA 10"
-        let refs = [reference(100, match: "near"), reference(200, match: "near"), reference(5000, match: "near", currency: "EUR"),
-                    reference(9000, match: "near", shipping: "included"), reference(10000, match: "proxy"), graded]
-        let value = stats(cards: [card("a", refs: refs, confirmed: false)]).values.first
-        XCTAssertEqual(value?.currency, "USD"); XCTAssertEqual(value?.lowCents, 150)
     }
     func testPendingAndLowConfidenceCardsDoNotInventPricesOrHighlights() {
         var pending = card("a", refs: [reference(1000)], serial: "1/1"); pending.state = "enriching"

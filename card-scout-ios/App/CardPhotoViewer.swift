@@ -8,17 +8,20 @@ struct CardPhotoViewer: View {
     @State private var back = false
     @State private var original = false
     let cardID: String
+    private let useCutout: Bool
 
-    init(cardID: String, initialBack: Bool = false) {
+    init(cardID: String, initialBack: Bool = false, showOriginal: Bool = false, useCutout: Bool = false) {
         self.cardID = cardID
+        self.useCutout = useCutout
         _back = State(initialValue: initialBack)
+        _original = State(initialValue: showOriginal)
     }
 
     var body: some View {
         if let card = store.library.cards.first(where: { $0.id == cardID }) {
             ZStack {
                 Color.scoutPhotoBackdrop.ignoresSafeArea()
-                LocalCardPhoto(name: back ? card.backFile : card.frontFile, maxPixel: 2600, original: original) { image, loading in
+                LocalCardPhoto(name: back ? card.backFile : card.frontFile, maxPixel: 2600, original: original, cutout: useCutout && !original) { image, loading in
                     if let image {
                         ZoomableCardPhoto(image: image)
                             .id("\(back)-\(original)").padding(.horizontal, 10)

@@ -26,7 +26,7 @@ class NoRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def run_response(job_dir, config, prompt, schema, model, effort, *, photo_only, attach_images, stop=None):
+def run_response(job_dir, config, prompt, schema, model, effort, *, photo_only, attach_images, stop=None, comparison=()):
     if stop is not None and stop.is_set(): raise InterruptedError("Worker stopped")
     content = [{"type": "input_text", "text": prompt}]
     if attach_images:
@@ -38,6 +38,7 @@ def run_response(job_dir, config, prompt, schema, model, effort, *, photo_only, 
                 content.append({"type": "input_image", "detail": "high",
                     "image_url": "data:" + mime + ";base64," + base64.b64encode(pixels).decode()})
     if photo_only and len(content) == 1: raise ValueError("Identification requires a photo")
+    content.extend(comparison)
     payload = {
         "model": model, "store": False,
         "service_tier": config.get("apiServiceTier", "fast"),

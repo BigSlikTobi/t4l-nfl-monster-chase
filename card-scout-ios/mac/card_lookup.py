@@ -7,14 +7,16 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 import re
+import sold_search
 import statistics
 import threading
 import time
 
-from analysis import identity_conflict, product_license_evidence
+from analysis import bowman_license_scope, identity_conflict, product_license_evidence, repair_confirmed_bowman_license
 from cardsight import Client, MarketError, CACHE_SECONDS, atomic, cache_work, normal, sale_url
 from listing_decisions import ListingDecisions, DecisionError
 from identity_decisions import IdentityResolver, VERSION as RESOLVER_VERSION
+from scout_value import ScoutValueModel, market_scope, snapshot_market
 
 UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 RESOLUTION_ERROR_COOLDOWN = 30
@@ -71,6 +73,7 @@ class CardLookup:
         self.root = root
         self.cache = root / "card-lookup-cache"
         self.cache.mkdir(mode=0o700, exist_ok=True)
+        self.scout_value = ScoutValueModel(root, self.cache, self.cached)
         self.client = client or Client(root)
         self.decisions = decisions or ListingDecisions(root)
         self.resolver = resolver or IdentityResolver(root)
@@ -148,6 +151,7 @@ class CardLookup:
         if previous.get("analysis", {}).get("assessmentSource") == "cardsight":
             output = deepcopy(previous)
             saved = output["analysis"]
+            repair_confirmed_bowman_license(saved)
             saved.pop("unpricedBaseExpiresAt", None)
             saved["insights"]["marketReferences"] = []
             identity = saved.get("cardSightIdentity") or {}
@@ -188,6 +192,10 @@ class CardLookup:
         # A fresh provider response can revise its candidates for the same photo.
         response = json.dumps(cached["detection"], sort_keys=True, separators=(",", ":")).encode()
         evidence = f"{front_digest}:{back_digest}:{hashlib.sha256(hints).hexdigest()}:{hashlib.sha256(response).hexdigest()}"
+        for filename in ("surface.jpg", "tilt.jpg"):
+            side = job_dir / filename
+            if side.is_file():
+                evidence += ":" + filename + ":" + hashlib.sha256(side.read_bytes()).hexdigest()
         resolution_key = f"resolved-v{RESOLVER_VERSION}-" + hashlib.sha256(evidence.encode()).hexdigest()
         with self.work_for(resolution_key, stop):
             resolved = self.cached(resolution_key)
@@ -253,6 +261,8 @@ class CardLookup:
                                confidence=confidence.get(p["id"])) for p in picker]
         product, subset = card.get("releaseName"), card.get("setName")
         subset = "Base" if subset == "Base Set" else subset
+        if product == "Panini Select" and detection.get("printedLevel"):
+            subset = detection["printedLevel"]
         if product == "Bowman" and year == 2026:
             subset = {"Chrome": "Chrome Base", "Prospects": "Paper Prospects"}.get(subset, subset)
         a = dict(player=card.get("name"), year=year, brand=card.get("manufacturer"), setName=product,
@@ -273,23 +283,34 @@ class CardLookup:
         release_name = catalog_release(dict(year=year, brand=a["brand"], setName=product))
         rated_rookie = a["rookie"] is True and product == "Donruss Optic" and year == 2025
         matches = []
+        incomplete = []
         for c in known:
             if card.get("variationOf"): continue  # A child UUID must never occupy its parent's base slot.
             probe = dict(year=c["year"], brand=c["brand"], setName=c["name"], subset=c["subset"])
             if (c["year"] == year and c["brand"] == a["brand"] and catalog_release(probe) == release_name
-                    and catalog_subset(probe) == card.get("setName")
+                    and (not detection.get("printedLevel") or c["subset"] == subset)
+                    and (catalog_subset(probe) == card.get("setName") or c["subset"] == detection.get("printedLevel"))
                     and variant_name(c.get("parallel"), rated_rookie) == variant_name(a["parallel"], rated_rookie)):
                 row = next((r for r in c["cards"] if r["number"] == a["cardNumber"] and normal(r["player"]) == normal(a["player"])), None)
-                if row: matches.append((c, row))
+                if row:
+                    matches.append((c, row))
+                elif (detection.get("finishState") == "verified" and not c.get("checklistComplete")
+                      and not any(r["number"] == a["cardNumber"] for r in c["cards"])):
+                    incomplete.append(c)
         collection = None
         if len(matches) == 1:
             c, row = matches[0]
             a.update(setName=c["name"], subset=c["subset"], parallel=c.get("parallel"), team=row["team"], rookie=row["rookie"])
             if exact: collection = deepcopy(c)
-        for release in product_license_evidence(job_dir):
-            if (release["year"] == year and release["brand"] == a["brand"]
-                    and catalog_release(dict(year=year, brand=a["brand"], setName=release["name"])) == release_name):
-                a["licenseScope"] = release["licenseScope"]
+        if (year, a["brand"], product) == (2026, "Topps", "Bowman"):
+            if card_exact:
+                scope = bowman_license_scope(year, a["brand"], product, a["subset"], a["cardNumber"])
+                if scope: a["licenseScope"] = scope
+        else:
+            for release in product_license_evidence(job_dir):
+                if (release["year"] == year and release["brand"] == a["brand"]
+                        and catalog_release(dict(year=year, brand=a["brand"], setName=release["name"])) == release_name):
+                    a["licenseScope"] = release["licenseScope"]
         conflict = identity_conflict(a)
         if conflict:
             exact = False; collection = None; a["uncertainties"].append(conflict)
@@ -308,9 +329,14 @@ class CardLookup:
                     a["cardSightIdentity"]["ordinaryBaseCatalog"] = card["ordinaryBaseCatalog"] is True
                     if card["ordinaryBaseCatalog"] is True and exact and not variant and subset == "Chrome Base":
                         a["insights"]["rarityTier"] = "base"
+            if exact and collection is None and not matches and len(incomplete) == 1:
+                collection = deepcopy(incomplete[0])
+                collection["cards"].append(dict(number=a["cardNumber"], player=a["player"], team=a["team"] or "",
+                                                rookie=a["rookie"] is True, imageURL=None))
+                a.update(setName=collection["name"], subset=collection["subset"], parallel=collection.get("parallel"))
             if exact and collection is None:
                 # One observed row, never an invented complete checklist.
-                collection = dict(id="cardsight-" + card["setId"] + ("-" + variant["id"] if variant else "") + ("-variation-" + card["id"] if card.get("variationOf") else ""),
+                collection = dict(id="cardsight-" + card["setId"] + ("-" + variant["id"] if variant else "") + ("-variation-" + card["id"] if card.get("variationOf") else "") + ("-" + normal(detection["printedLevel"]).replace(" ", "-") if detection.get("printedLevel") else ""),
                                   name=a["setName"], year=year, brand=a["brand"], subset=a["subset"], parallel=a["parallel"],
                                   expectedCount=None, checklistComplete=False,
                                   sourceURL="https://api.cardsight.ai/v1/identify/card/football", checkedAt=dt.date.today().isoformat(),
@@ -320,6 +346,22 @@ class CardLookup:
             a["collectionID"] = collection["id"] if collection else None
         else:
             a["uncertainties"].append("Karte oder Variante nicht eindeutig erkannt.")
+        if detection.get("finishPolicy"):
+            a["finishPolicy"] = detection["finishPolicy"]
+            a["finishState"] = detection["finishState"]
+            edition = detection.get("independentEdition")
+            if edition and card_exact and not conflict:
+                from chrome_finish import SOURCE
+                a.update(parallel=edition, cardSightIdentity=None, cardSightVariants=[])
+                a["insights"].update(rarityTier="parallel", rarityBullets=[edition])
+                collection = dict(id="photo-" + card["setId"] + "-" + normal(edition).replace(" ", "-"),
+                                  name=a["setName"], year=year, brand=a["brand"], subset=a["subset"], parallel=edition,
+                                  expectedCount=None, checklistComplete=False, sourceURL=SOURCE, checkedAt=dt.date.today().isoformat(),
+                                  cards=[dict(number=a["cardNumber"], player=a["player"], team=a["team"] or "", rookie=a["rookie"] is True, imageURL=None)])
+                a["collectionID"] = collection["id"]
+                exact = True
+            if not exact and a["finishState"] == "verified":
+                a["finishState"] = "pending"
         a.update(identityConfirmed=bool(exact), needsReview=not bool(exact) or a["licenseScope"] == "unknown")
         return dict(analysis=a, collection=collection,
                     matches=[dict(collectionID=collection["id"], number=a["cardNumber"])] if collection else [],
@@ -360,20 +402,74 @@ class CardLookup:
         key = self.key(a)
         if not key or not a.get("identityConfirmed"): return
         variant_id = self.selected_id(a)
-        if self.price_status(self.snapshot_for(a, self.cached(key)), variant_id) != "empty": return
+        snapshot = self.snapshot_for(a, self.cached(key))
+        status = self.price_status(snapshot, variant_id)
+        if status != "empty" and not self.needs_sale_search(a, snapshot) and not (status == "ready" and
+                snapshot["options"][variant_id].get("valueMarket") != self.estimation_market(a)):
+            return
         task = (key, variant_id)
         with self.pending_lock:
             if task in self.pending or len(self.pending) >= 100: return
             self.pending.add(task)
 
         def run(analysis):
-            try: self.lookup(analysis)
+            try:
+                self.lookup(analysis)
+                self.find_missing_sales(analysis, key)
             finally:
                 with self.pending_lock: self.pending.discard(task)
         try: self.executor.submit(run, deepcopy(a))
         except RuntimeError:
             with self.pending_lock: self.pending.discard(task)
             raise
+
+    def needs_sale_search(self, a, snapshot):
+        if not snapshot or snapshot.get("status") != "available" or identity_conflict(a):
+            return False
+        option = snapshot["options"].get(self.selected_id(a), {})
+        if (option.get("priceStatus") not in ("ready", "no_match") or option.get("soldCount")
+                or (option.get("saleSearchVersion") == sold_search.VERSION and option.get("saleSearchAfter", 0) > time.time())):
+            return False
+        return not self.scout_value_for_variant(a["cardSightIdentity"], option, snapshot)
+
+    def search_references(self, a, listing_type):
+        query = dict(q=sold_search.query_for(a), period="90d", listing_type=listing_type, limit=25)
+        response = self.client.request("GET", "/v1/pricing/search", query)
+        if any(response["query"].get(k) != v for k, v in query.items()):
+            raise ValueError("Unexpected market search filters")
+        rows = response["results"]
+        if not isinstance(rows, list) or len(rows) > 25 or not all(isinstance(r, dict) for r in rows):
+            raise ValueError("Invalid market search rows")
+        eligible = [r for r in unique_listings(rows) if sold_search.possible_sale(a, r, listing_type)]
+        return self.checked_references(a, eligible, title_search=listing_type == "auction")
+
+    def find_missing_sales(self, a, key):
+        with self.work_for(key):
+            snapshot = self.snapshot_for(a, self.cached(key))
+            if not self.needs_sale_search(a, snapshot):
+                return
+            option = snapshot["options"][self.selected_id(a)]
+            try:
+                refs = self.search_references(a, "auction")
+                existing = option.get("references", [])
+                if not refs and not existing and self.estimation_market(a):
+                    refs = self.search_references(a, "fixed")
+                urls = {r["url"] for r in existing}
+                additions = [dict(r, expiresAt=snapshot["expiresAt"]) for r in refs if r["url"] not in urls]
+                if additions:
+                    combined = additions + existing
+                    sales = [r for r in combined if r["kind"] == "sold"]
+                    asks = [r for r in combined if r["kind"] == "ask"]
+                    option.update(priceStatus="ready", references=combined, soldCount=len(sales),
+                                  medianCents=self.median(sales), soldShipping="unknown", currency="USD",
+                                  askingCount=len(asks), askingMedianCents=self.median(asks),
+                                  askingCurrency="USD" if asks else None, askingShipping="unknown" if asks else None,
+                                  valueMarket=self.estimation_market(a))
+                option["saleSearchAfter"] = snapshot["expiresAt"]
+            except (MarketError, DecisionError, ValueError, OSError, KeyError, TypeError):
+                option["saleSearchAfter"] = min(time.time() + 1800, snapshot["expiresAt"])
+            option["saleSearchVersion"] = sold_search.VERSION
+            atomic(self.cache / (key + ".json"), snapshot)
 
     @staticmethod
     def validate_market_context(a, data, parallel, *, unfiltered=False):
@@ -460,15 +556,27 @@ class CardLookup:
         return self.save(key, status="unavailable", options={}, legacyOffers=self.legacy_offers(key),
                          checkedAt=dt.date.today().isoformat())
 
+    @staticmethod
+    def estimation_market(a):
+        identity = a["cardSightIdentity"]
+        if (identity_conflict(a) or a.get("serialNumber") or any(identity.get(field) for field in
+                ("slabbed", "numberedTo", "autograph", "variationOf"))):
+            return None
+        return market_scope(a)
+
     def price_selected(self, a, key, snapshot, retry=False):
         snapshot = self.snapshot_for(a, snapshot)
         variant_id = self.selected_id(a)
         previous = self.price_status(snapshot, variant_id)
-        if previous != "empty" and not (retry and previous == "unavailable" and "data" in snapshot):
-            return
         identity = a["cardSightIdentity"]
+        market = self.estimation_market(a)
+        if previous != "empty" and not (retry and previous == "unavailable" and "data" in snapshot):
+            if previous == "ready" and snapshot["options"][variant_id].get("valueMarket") != market:
+                snapshot["options"][variant_id]["valueMarket"] = market
+                atomic(self.cache / (key + ".json"), snapshot)
+            return
         option = dict(id=variant_id, name=identity.get("parallelName") or a.get("parallel") or "Base",
-                      numberedTo=identity.get("numberedTo"))
+                      numberedTo=identity.get("numberedTo"), valueMarket=market)
         source = snapshot["data"]
         pid = identity.get("parallelID")
         view = dict(card=source["card"], query=dict(source["query"], parallel_id=pid), raw=source["raw"])
@@ -585,6 +693,7 @@ class CardLookup:
         output = self.attach(result)
         a = output["analysis"]
         a.pop("unpricedBaseExpiresAt", None)
+        a["insights"].pop("scoutEstimate", None)
         option = next((p for p in a.get("cardSightVariants", []) if p["id"] == variant_id), None)
         if not option or not a.get("cardSightIdentity") or not self.allowed_option(a, option):
             raise ValueError("Unknown or conflicting card variant")
@@ -598,6 +707,7 @@ class CardLookup:
         identity.update(parallelID=None if variant_id == "base" else variant_id, parallelName=a["parallel"], numberedTo=option.get("numberedTo"))
         if identity_conflict(a): raise ValueError("Card evidence contradicts selected variant")
         a.update(identityConfirmed=True, needsReview=a.get("licenseScope") == "unknown", uncertainties=[])
+        repair_confirmed_bowman_license(a)
         a["insights"].update(rarityTier="base" if variant_id == "base" else "parallel", rarityBullets=[] if variant_id == "base" else [option["name"]])
         a["collectionID"] = "cardsight-" + identity["setID"] + ("-" + variant_id if variant_id != "base" else "") + ("-variation-" + identity["cardID"] if identity.get("variationOf") else "")
         output["collection"] = dict(id=a["collectionID"], name=a["setName"], year=a["year"], brand=a["brand"], subset=a["subset"], parallel=a["parallel"], expectedCount=None, checklistComplete=False,
@@ -623,12 +733,16 @@ class CardLookup:
         records = data["raw"]["records"]
         if not isinstance(records, list) or len(records) > limit or any(not isinstance(row, dict) for row in records):
             raise ValueError("Invalid listings")
-        records = unique_listings(records)
+        return self.checked_references(a, [r for r in unique_listings(records) if listing_for_finish(a, r)])
+
+    def checked_references(self, a, records, *, title_search=False):
+        identity = a["cardSightIdentity"]
         today = dt.datetime.now(dt.timezone.utc).date()
         seen, candidates, listings = set(), {}, []
+        proven = {}
         for row in records:
             title, link = row.get("title"), sale_url(row.get("url"))
-            if (row.get("listing_type") not in ("auction", "fixed") or not listing_for_finish(a, row)
+            if (row.get("listing_type") not in ("auction", "fixed")
                     or row.get("grade_id") is not None or not link or link in seen or not isinstance(title, str)
                     or not 0 < len(title) <= 2000 or row.get("source") != "ebay"):
                 continue
@@ -650,11 +764,14 @@ class CardLookup:
                 kind="sold" if row["listing_type"] == "auction" else "ask", grade="raw", condition=None,
                 matchQuality="exact", lowCents=cents, highCents=cents, currency="USD", saleDate=date.isoformat(),
                 checkedAt=today.isoformat(), shipping="unknown", expiresAt=time.time() + CACHE_SECONDS)
+            if title_search and sold_search.exact_named_parallel(a, row, today):
+                proven[listing_id] = "match"
+                continue
             listings.append(dict(id=listing_id, title=title, parallelID=row.get("parallel_id"),
                 parallelName=row.get("parallel_name"), gradeID=row.get("grade_id"), listingType=row["listing_type"]))
         target = {k: a.get(k) for k in ("player", "year", "brand", "setName", "subset", "cardNumber", "parallel", "serialNumber", "rookie")}
         target.update(cardSightIdentity={k: v for k, v in identity.items() if k not in ("eligibleParallelIDs", "isParallelOnly", "ordinaryBaseCatalog")}, grade="raw", autograph=identity.get("autograph"), attributes=identity.get("attributes", []))
-        decisions = self.decisions.classify(target, listings)
+        decisions = {**proven, **self.decisions.classify(target, listings)}
         if set(decisions) != set(candidates) or any(v not in ("match", "different", "unclear") for v in decisions.values()):
             raise DecisionError("Invalid listing decision IDs")
         return [ref for listing_id, ref in candidates.items() if decisions[listing_id] == "match"]
@@ -663,11 +780,15 @@ class CardLookup:
         output = deepcopy(result)
         a = output.get("analysis")
         if not a: return output
+        repair_confirmed_bowman_license(a)
         a.pop("unpricedBaseExpiresAt", None)
         key = self.key(a)
         snapshot = self.snapshot_for(a, self.cached(key)) if key else None
         price = self.price_view(a, snapshot) if snapshot else None
         a["insights"]["marketReferences"] = deepcopy(price["references"]) if price and a.get("identityConfirmed") else []
+        a["insights"].pop("scoutEstimate", None)
+        identity = a.get("cardSightIdentity") or {}
+        confirmed = a.get("identityConfirmed") and not identity_conflict(a)
         # Photo confidence, catalog names and print runs belong to this result.
         # Previous saved prices and another copy's confidence do not.
         options = {p["id"]: {k: p[k] for k in ("id", "name", "confidence", "numberedTo") if k in p}
@@ -676,9 +797,13 @@ class CardLookup:
             for variant in price["variants"]:
                 option = options.setdefault(variant["id"], dict(id=variant["id"], name=variant["name"]))
                 for k, v in variant.items():
-                    if k not in ("id", "name", "confidence", "references", "priceStatus") and v is not None:
+                    if k not in ("id", "name", "confidence", "references", "priceStatus", "valueMarket") and v is not None:
                         if k == "numberedTo" and option.get(k) is not None: continue
                         option[k] = v
+                if confirmed and (value := self.scout_value_for_variant(identity, variant, snapshot)):
+                    option["scoutValue"] = value
+                    if variant["id"] == self.selected_id(a):
+                        a["insights"]["scoutEstimate"] = value
         for old in self.legacy_offers(key, snapshot).get("options", []):
             option = options.setdefault(old["id"], old)
             if "numberedTo" not in option and old.get("numberedTo") is not None:
@@ -687,7 +812,6 @@ class CardLookup:
             a["cardSightVariants"] = [p for p in options.values() if self.allowed_option(a, p)]
         a["insights"]["marketBullets"] = []
         status = self.status(a)
-        identity = a.get("cardSightIdentity") or {}
         if (status == "no_match" and price and price["status"] == "no_match"
                 and a.get("identityConfirmed") and not identity_conflict(a)
                 and identity.get("ordinaryBaseCatalog") is True and "base" in identity.get("eligibleParallelIDs", [])
@@ -698,3 +822,20 @@ class CardLookup:
         a["insights"]["sourceChecks"] = [dict(provider="CardSight", status="found" if status == "ready" else status, url="https://cardsight.ai")]
         if price: a["marketCheckedAt"] = price["checkedAt"]
         return output
+
+    def scout_value_for_variant(self, identity, variant, snapshot):
+        market = snapshot_market(snapshot, variant.get("valueMarket"))
+        ask = variant.get("askingMedianCents")
+        if not market or not ask:
+            return None
+        try:
+            factor = self.scout_value.factor(identity["cardID"], market, (identity["setID"], variant["id"]))
+        except OSError:
+            return None
+        if factor is None:
+            return None
+        amount = int(Decimal(str(ask * factor)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        if 0 < amount <= 100_000_000:
+            return dict(amountCents=amount, currency=variant["askingCurrency"], shipping=variant["askingShipping"],
+                        checkedAt=snapshot["checkedAt"], expiresAt=snapshot["expiresAt"])
+        return None

@@ -14,8 +14,8 @@ public struct BurnCount: Sendable {
     public let pricedCards: Int
     public let totalCards: Int
     public let purchaseCount: Int
-    public let includesComparisonEstimates: Bool
-    public var isIndicative: Bool { !isManualValue && (!hasCompleteCoverage || includesComparisonEstimates) }
+    public let includesModeledValues: Bool
+    public var isIndicative: Bool { !isManualValue && (!hasCompleteCoverage || includesModeledValues) }
     public var hasCompleteCoverage: Bool { totalCards > 0 && (isManualValue || pricedCards == totalCards) }
     public var canCompare: Bool { spentCents != nil && valueLowCents != nil }
     public var burnLowCents: Int? {
@@ -42,25 +42,66 @@ public struct BurnCount: Sendable {
         if valueHighCents < spentCents { return .roasted }
         return .curious
     }
-    public init(statistics: CollectionStatistics, currency: String, manualValueCents: Int? = nil) {
+    public init(statistics: CollectionStatistics, currency: String, manualValueCents: Int? = nil,
+                manualValueCurrency: String? = nil, exchangeRates: [String: Decimal]? = nil) {
         let manual = manualValueCents.flatMap { (0...100_000_000).contains($0) ? $0 : nil }
         isManualValue = manual != nil
         self.currency = currency
         // Card/pack/box totals include fees once; supplies and other costs stay in the ledger.
-        let purchases = statistics.purchases.filter { $0.currency == currency && [.card, .pack, .box].contains($0.category) }
-        spentCents = purchases.isEmpty ? nil : purchases.reduce(0) { $0 + $1.amountCents }
+        let purchases = statistics.purchases.filter {
+            [.card, .pack, .box].contains($0.category) && (exchangeRates != nil || $0.currency == currency)
+        }
         purchaseCount = purchases.count
         let personalIDs = Set(statistics.personalValues.map(\.cardID))
-        let values = (statistics.values.filter { !personalIDs.contains($0.cardID) } + statistics.personalValues)
-            .filter { $0.currency == currency }
-        let value = values.isEmpty ? nil : (low: values.reduce(0) { $0 + $1.lowCents }, high: values.reduce(0) { $0 + $1.highCents })
-        includesComparisonEstimates = values.contains { !$0.isPortfolioEligible }
-        valueLowCents = manual ?? value?.low; valueHighCents = manual ?? value?.high
-        // A qualified zero contributes to coverage in a priced currency without converting any money.
-        let otherBaseZeros = statistics.values.filter { $0.isUnpricedBase && $0.currency != currency }
-        pricedCards = values.count + (values.isEmpty ? 0 : otherBaseZeros.count)
+        let effectiveValues = statistics.values.filter { !personalIDs.contains($0.cardID) } + statistics.personalValues
+        let values = effectiveValues.filter { exchangeRates != nil || $0.currency == currency }
+
+        if let exchangeRates {
+            spentCents = Self.total(purchases.map { ($0.amountCents, $0.currency) }, in: currency, rates: exchangeRates)
+            let manualAmounts = manual.map { [($0, manualValueCurrency ?? currency)] }
+            let high = Self.total(manualAmounts ?? values.map { ($0.highCents, $0.currency) }, in: currency, rates: exchangeRates)
+            valueHighCents = high
+            valueLowCents = high.flatMap { _ in
+                Self.total(manualAmounts ?? values.map { ($0.lowCents, $0.currency) }, in: currency, rates: exchangeRates)
+            }
+            pricedCards = values.count
+        } else {
+            spentCents = purchases.isEmpty ? nil : purchases.reduce(0) { $0 + $1.amountCents }
+            let hasOnlyBaseZeros = values.allSatisfy(\.isUnpricedBase)
+            let pricedElsewhere = effectiveValues.contains { $0.currency != currency && $0.highCents > 0 }
+            let showValue = !values.isEmpty && !(hasOnlyBaseZeros && pricedElsewhere)
+            valueLowCents = manual ?? (showValue ? values.reduce(0) { $0 + $1.lowCents } : nil)
+            valueHighCents = manual ?? (showValue ? values.reduce(0) { $0 + $1.highCents } : nil)
+            let otherBaseZeros = effectiveValues.filter { $0.isUnpricedBase && $0.currency != currency }
+            pricedCards = values.count + (values.isEmpty ? 0 : otherBaseZeros.count)
+        }
+        includesModeledValues = values.contains { $0.isScoutEstimate == true }
         totalCards = statistics.totalCards
     }
+
+    /// Rates are units of each currency per EUR. Sum first and round only the displayed total.
+    private static func total(_ amounts: [(cents: Int, currency: String)], in target: String,
+                              rates: [String: Decimal]) -> Int? {
+        guard !amounts.isEmpty else { return nil }
+        var subtotals: [String: Decimal] = [:]
+        for amount in amounts {
+            subtotals[amount.currency, default: 0] += Decimal(amount.cents)
+        }
+        var total: Decimal = 0
+        for (source, cents) in subtotals.sorted(by: { $0.key < $1.key }) {
+            if source == target || cents == 0 {
+                total += cents
+            } else {
+                guard let from = source == "EUR" ? 1 : rates[source], from > 0,
+                      let to = target == "EUR" ? 1 : rates[target], to > 0 else { return nil }
+                total += cents * to / from
+            }
+        }
+        var rounded: Decimal = 0
+        NSDecimalRound(&rounded, &total, 0, .plain)
+        return Int(NSDecimalNumber(decimal: rounded).stringValue)
+    }
+
 }
 
 

@@ -1,3 +1,4 @@
-"NSCameraUsageDescription" = "Photograph cards and scan a pairing code.";
+"NSCameraUsageDescription" = "Photograph cards, film packs, and scan a pairing code.";
+"NSMicrophoneUsageDescription" = "Record sound for your pack videos.";
 "NSLocalNetworkUsageDescription" = "Connect securely to your analysis server.";
 "CFBundleDisplayName" = "Burn Count";

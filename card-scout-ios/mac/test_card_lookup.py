@@ -25,7 +25,7 @@ def detection():
 
 
 def pricing(parallel=None):
-    day = dt.date.today().isoformat()
+    day = dt.datetime.now(dt.timezone.utc).date().isoformat()
     return dict(card=dict(card_id=CARD, name="Isiah Pacheco", number="147", set=dict(set_id=SET, year="2025", release="Donruss Optic", name="Base Set")),
                 query=dict(parallel_id=parallel, grade_id=None, period="90d", listing_type="both"),
                 raw=dict(records=[dict(title="2025 Donruss Optic Isiah Pacheco #147" + (" Orange" if parallel else ""),
@@ -62,6 +62,45 @@ class LookupTests(unittest.TestCase):
 
     def analysis(self): return self.lookup.identify(self.job, [])["analysis"]
 
+    def test_bowman_uses_the_confirmed_checklist_family_for_licensing(self):
+        for family, number, scope in (
+                ("Base Set", "25", "nfl_and_nflpa"), ("Chrome", "BCV-69", "nfl_and_nflpa"),
+                ("Prospects", "BPP-72", "college"), ("Chrome Prospects", "ALT-1", "college"),
+                ("Gen Next", "GN-16", "college"), ("Bowman Verified", "BV-1", "college"),
+                ("Rockstar Rookies", "RR-17", "nfl_and_nflpa"), ("ROY Favorites", "ROY-11", "nfl_and_nflpa"),
+        ):
+            with self.subTest(family=family):
+                detected = detection()
+                detected["card"].update(year="2026", manufacturer="Topps", releaseName="Bowman", setName=family, number=number)
+                with patch("card_lookup.product_license_evidence", side_effect=AssertionError("Release-wide scope is ambiguous")):
+                    result = self.lookup.result(detected, [], self.job)
+                self.assertTrue(result["analysis"]["identityConfirmed"])
+                self.assertEqual(result["analysis"]["licenseScope"], scope)
+                self.assertFalse(result["analysis"]["needsReview"])
+                self.assertEqual(self.lookup.estimation_market(result["analysis"]), "college" if scope == "college" else "nfl")
+
+                result["analysis"].update(licenseScope="unknown", needsReview=True)
+                repaired = self.lookup.attach(result)["analysis"]
+                self.assertEqual(repaired["licenseScope"], scope)
+                self.assertFalse(repaired["needsReview"])
+                self.assertEqual(result["analysis"]["licenseScope"], "unknown")
+                result["analysis"]["uncertainties"] = ["Separate review needed"]
+                self.assertTrue(self.lookup.attach(result)["analysis"]["needsReview"])
+
+    def test_bowman_scope_does_not_clear_an_unconfirmed_or_contradictory_result(self):
+        detected = detection()
+        detected["card"].update(year="2026", manufacturer="Topps", releaseName="Bowman", setName="Chrome Prospects", number="BPP-72")
+        result = self.lookup.result(detected, [], self.job)
+        self.assertFalse(result["analysis"]["identityConfirmed"])
+        self.assertTrue(result["analysis"]["needsReview"])
+        self.assertEqual(result["analysis"]["licenseScope"], "unknown")
+        detected["card"]["number"] = "BCP-72"
+        detected["variantUnresolved"] = True
+        result = self.lookup.result(detected, [], self.job)
+        self.assertEqual(result["analysis"]["licenseScope"], "college")
+        self.assertFalse(self.lookup.attach(result)["analysis"]["identityConfirmed"])
+        self.assertTrue(self.lookup.attach(result)["analysis"]["needsReview"])
+
     def test_front_identification_then_exact_uuid_price_and_median(self):
         a = self.analysis()
         self.assertEqual(a["cardSightIdentity"]["cardID"], CARD)
@@ -72,9 +111,46 @@ class LookupTests(unittest.TestCase):
         value = self.lookup.lookup(a)
         self.assertEqual(value["medianCents"], 100)
         self.assertEqual(len(value["references"]), 4)
+        sold_only = self.lookup.attach(dict(analysis=a))["analysis"]
+        self.assertNotIn("scoutEstimate", sold_only["insights"])
+        self.assertNotIn("scoutValue", sold_only["cardSightVariants"][0])
         self.assertEqual([(c[0], c[1]) for c in self.calls], [("POST", "/v1/identify/card/football"), ("GET", "/v1/pricing/" + CARD)])
         self.assertEqual(self.calls[0][3], (self.job / "front.jpg").read_bytes())
         self.assertEqual(self.calls[1][2], dict(grade_id="null", period="90d", listing_type="both", limit=500))
+
+    def test_value_uses_adjusted_ask_even_when_two_exact_sales_are_available(self):
+        target = self.analysis()
+        for index in range(6):
+            analysis = deepcopy(target)
+            card_id = f"11111111-1111-4111-a111-11111111112{index}"
+            if index < 5:
+                analysis["cardSightIdentity"]["cardID"] = card_id
+            else:
+                card_id = CARD
+            data = pricing()
+            data["card"]["card_id"] = card_id
+            ask = dict(data["raw"]["records"][0], price=10, listing_type="fixed",
+                       url=f"https://www.ebay.com/itm/{123456789900+index}")
+            data["raw"]["records"] = [ask]
+            if index < 5:
+                data["raw"]["records"].append(dict(ask, price=6.5, listing_type="auction",
+                                                       url=f"https://www.ebay.com/itm/{123456789800+index}"))
+            else:
+                data["raw"]["records"].extend(dict(ask, price=amount, listing_type="auction",
+                    url=f"https://www.ebay.com/itm/{123456789810+i}") for i, amount in enumerate((0.50, 20.50)))
+            key = self.lookup.key(analysis)
+            snapshot = self.lookup.store_snapshot(analysis, key, data)
+            self.lookup.price_selected(analysis, key, snapshot)
+
+        result = self.lookup.attach(dict(analysis=target))["analysis"]
+        value = result["insights"]["scoutEstimate"]
+        self.assertEqual(value["amountCents"], 650)
+        self.assertCountEqual([ref["kind"] for ref in result["insights"]["marketReferences"]], ["ask", "sold", "sold"])
+        self.assertEqual(result["cardSightVariants"][0]["scoutValue"], value)
+        self.assertEqual(result["cardSightVariants"][0]["medianCents"], 1050)
+        revised = self.lookup.select(dict(analysis=target), "base")["analysis"]
+        self.assertNotIn("scoutEstimate", revised["insights"])
+        self.assertNotIn("scoutValue", revised["cardSightVariants"][0])
 
     def test_cache_reused_across_jobs_and_process_restart(self):
         a = self.analysis(); self.lookup.lookup(a)
@@ -158,6 +234,22 @@ class LookupTests(unittest.TestCase):
         chosen = self.lookup.select(value, "base", [original])
         self.assertEqual(chosen["collection"], original)
 
+    def test_confirmed_new_parallel_row_survives_worker_restart(self):
+        repo = Repository(self.root)
+        first = detection()
+        first["card"]["parallelSuggestions"] = [dict(id=PARALLEL, name="RayWave Refractor", confidence="High")]
+        later = deepcopy(first)
+        later["card"].update(id="44444444-4444-4444-a444-444444444444", number="55", name="Second Player")
+        for job_id, observed in ((IDENTITY, first), (later["card"]["id"], later)):
+            repo.submit(dict(id=job_id, front=PHOTO))
+            found = self.lookup.result(observed, repo.checklists(), self.job)
+            self.assertTrue(found["analysis"]["identityConfirmed"])
+            repo.finish(job_id, found)
+        editions = Repository(self.root).checklists()
+        wave, = [c for c in editions if c.get("parallel") == "RayWave Refractor"]
+        self.assertEqual({r["number"] for r in wave["cards"]}, {first["card"]["number"], "55"})
+        self.assertFalse(wave["checklistComplete"])
+
     def test_bulk_prices_deduplicate_ids_and_reuse_normal_variant_validation(self):
         a = self.analysis()
         calls = []
@@ -208,8 +300,8 @@ class LookupTests(unittest.TestCase):
         a = self.analysis()
         mutations = [dict(listing_type="invalid"), dict(parallel_id=PARALLEL), dict(grade_id=SET),
                      dict(price=True), dict(price=float("nan")), dict(currency="EUR"),
-                     dict(date=(dt.date.today() - dt.timedelta(days=91)).isoformat()),
-                     dict(date=(dt.date.today() + dt.timedelta(days=1)).isoformat())]
+                     dict(date=(dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=91)).isoformat()),
+                     dict(date=(dt.datetime.now(dt.timezone.utc).date() + dt.timedelta(days=1)).isoformat())]
         for mutation in mutations:
             data = pricing(); data["raw"]["records"] = [dict(data["raw"]["records"][0], **mutation)]
             with self.subTest(mutation=mutation): self.assertEqual(self.lookup.references(a, data), [])
@@ -571,6 +663,18 @@ class DirectPipelineTests(unittest.TestCase):
                         self.assertEqual(job["priceStatus"], "ready")
                         self.assertEqual(len(job["analysis"]["insights"]["marketReferences"]), 4)
                         self.assertEqual(calls, ["/v1/identify/card/football", "/v1/pricing/" + CARD])
+                        request = dict(cardID=CARD, setID=SET, variantID="base", cachedOnly=True)
+                        reviewed = repo.reviewed_prices(IDENTITY, request)
+                        self.assertEqual(reviewed["priceStatus"], "ready")
+                        self.assertEqual(reviewed["analysis"]["insights"]["marketReferences"], job["analysis"]["insights"]["marketReferences"])
+                        with patch.object(repo.card_lookup, "start") as start:
+                            repo.reviewed_prices(IDENTITY, dict(request, cachedOnly=False))
+                            start.assert_called_once()
+                            with self.assertRaises(ValueError):
+                                repo.reviewed_prices(IDENTITY, dict(request, cardID="other"))
+                            with self.assertRaises(ValueError):
+                                repo.reviewed_prices(IDENTITY, dict(request, variantID="unoffered"))
+                            start.assert_called_once()
                         # Durable job assessments contain identity, not transient sales.
                         with repo.db() as db: saved = json.loads(db.execute("SELECT result FROM jobs WHERE id=?", (IDENTITY,)).fetchone()[0])
                         self.assertEqual(saved["analysis"]["insights"]["marketReferences"], [])

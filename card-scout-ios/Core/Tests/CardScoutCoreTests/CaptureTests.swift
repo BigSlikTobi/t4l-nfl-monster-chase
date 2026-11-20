@@ -10,6 +10,26 @@ final class CaptureTests: XCTestCase {
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
 
+    func testFrontRetakeWaitsForAnalyzeAndKeepsThePairAcrossRelaunch() throws {
+        let started = try disk.beginCapturePair(CapturePhoto(front: Data([1]), text: "old"),
+                                                sessionID: "studio", in: Library())
+        let id = started.cards[0].id
+        let original = started.cards[0].frontFile
+        let retaken = try disk.replacePendingFront(cardID: id, with: CapturePhoto(front: Data([2]), text: "new"), in: started)
+        XCTAssertEqual(try disk.load().cards, retaken.cards)
+        XCTAssertEqual(retaken.cards.count, 1)
+        XCTAssertEqual(retaken.cards[0].state, "awaiting_back")
+        XCTAssertEqual(retaken.cards[0].captureText, "new")
+        XCTAssertEqual(try Data(contentsOf: disk.photoURL(original)), Data([1]))
+        XCTAssertThrowsError(try disk.finishCapturePair(cardID: "another", back: Data([3]), in: retaken))
+        let analyzed = try disk.finishCapturePair(cardID: id, back: Data([3]), text: "number 11", in: retaken)
+        XCTAssertEqual(analyzed.cards[0].id, id)
+        XCTAssertEqual(analyzed.cards[0].state, "queued")
+        XCTAssertEqual(try Data(contentsOf: disk.photoURL(analyzed.cards[0].frontFile)), Data([2]))
+        XCTAssertThrowsError(try disk.replacePendingFront(cardID: id, with: CapturePhoto(front: Data([4])), in: analyzed))
+        XCTAssertEqual(try disk.load().cards, analyzed.cards)
+    }
+
     func testHundredCapturesPersistOfflineWithoutChangingExistingCard() throws {
         var library = Library()
         library.cards = [OwnedCard(frontFile: "original.jpg", backFile: "back.jpg")]

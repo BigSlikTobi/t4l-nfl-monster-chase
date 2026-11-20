@@ -9,10 +9,41 @@ import CardScoutCore
     var dashboardStatistics: CollectionStatistics {
         CollectionStatistics(library: library, cachedValues: dashboardValueCache.values(in: library))
     }
-    func unpricedBaseDisplayValue(for card: OwnedCard) -> CollectionCardValue? {
-        guard let zero = card.unpricedBaseValue() else { return nil }
-        return dashboardValueCache.value(for: card) ?? zero
+    private static let burnExchangeRateKey = "burnExchangeRate"
+    private(set) var burnExchangeRate = UserDefaults.standard.data(forKey: burnExchangeRateKey)
+        .flatMap { try? JSONDecoder().decode(EuroReferenceRate.self, from: $0) }
+    private(set) var burnExchangeRateUnavailable = false
+    private var lastBurnExchangeRateRequest: Date?
+
+    var latestManualBurnValue: ManualBurnValue? {
+        CardPurchase.currencies.compactMap { library.currentManualBurnValue(currency: $0) }
+            .max { $0.recordedAt < $1.recordedAt }
     }
+
+    func burnCount(statistics: CollectionStatistics, currency: String) -> BurnCount {
+        let manual = latestManualBurnValue
+        return BurnCount(statistics: statistics, currency: currency, manualValueCents: manual?.amountCents,
+                         manualValueCurrency: manual?.currency, exchangeRates: burnExchangeRate?.rates ?? [:])
+    }
+
+    func refreshBurnExchangeRate() {
+        if let lastBurnExchangeRateRequest, Date().timeIntervalSince(lastBurnExchangeRateRequest) < 1800 { return }
+        lastBurnExchangeRateRequest = Date()
+        Task {
+            do {
+                let rate = try await EuroReferenceRate.fetch()
+                burnExchangeRate = rate
+                burnExchangeRateUnavailable = false
+                if let data = try? JSONEncoder().encode(rate) {
+                    UserDefaults.standard.set(data, forKey: Self.burnExchangeRateKey)
+                }
+            } catch {
+                lastBurnExchangeRateRequest = nil
+                burnExchangeRateUnavailable = burnExchangeRate == nil
+            }
+        }
+    }
+
     var pairing = PairingKeychain.load()
     var pairingCandidate: Pairing?
     var lastError: String?
@@ -21,6 +52,12 @@ import CardScoutCore
     var syncing = false
     var captureSessionID = UUID().uuidString.lowercased()
     var showSettings = false
+    var showConnectionSettings = false
+
+    func openConnectionSettings() {
+        showConnectionSettings = true
+        showSettings = true
+    }
     var selectedTab = 0
     var showMarketRanking = false
     var chaseError: String?
@@ -63,6 +100,15 @@ import CardScoutCore
                             previous.cards.contains { $0.id == card.id && $0.jobID != card.jobID }
                         }.map(\.id))
                     }
+                    if let index = arguments.firstIndex(of: "--apply-reviewed-finishes"), arguments.indices.contains(index + 1),
+                       let operation = UUID(uuidString: arguments[index + 1]) {
+                        library = try disk!.applyReviewedFinishes(operation: operation, in: library)
+                    }
+                    if let index = arguments.firstIndex(of: "--recheck-scan-ids"), arguments.indices.contains(index + 2) {
+                        let ids = Set(arguments[index + 2].split(separator: ",").map(String.init))
+                        library = try disk!.recheckPhotos(ids: ids, operation: arguments[index + 1], in: library)
+                        reanalysisCardIDs = ids
+                    }
                     if let index = arguments.firstIndex(of: "--reanalyze-saved-jobs"), arguments.indices.contains(index + 1) {
                         let values = arguments[index + 1].split(separator: ",").map(String.init)
                         guard !values.isEmpty, values.count <= 200, values.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw StoreError.invalidResult }
@@ -93,12 +139,13 @@ import CardScoutCore
     private func recordReanalysisStatus() {
         guard let disk, !reanalysisCardIDs.isEmpty else { return }
         let cards = library.cards.filter { reanalysisCardIDs.contains($0.id) }
+        UIApplication.shared.isIdleTimerDisabled = cards.contains(where: \.isAwaitingAnalysis)
         let value: [String: Any] = ["targetedCards": cards.count,
             "pending": cards.filter(\.isAwaitingAnalysis).count,
             "completed": cards.filter { $0.state == "analyzed" }.count,
             "failed": cards.filter { $0.state == "failed" }.count,
             "confirmed": cards.filter { $0.hasCurrentAnalysis && $0.analysis?.identityConfirmed == true && $0.analysis?.confidence == "high" }.count,
-            "priced": cards.filter { $0.analysis?.marketSummary != nil || $0.analysis?.askingSummary != nil }.count,
+            "priced": cards.filter { dashboardValueCache.collectionQuote(for: $0) != nil }.count,
             "checkedAt": ISO8601DateFormatter().string(from: Date())]
         if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) {
             try? data.write(to: disk.root.appendingPathComponent("reanalysis-status.json"), options: [.atomic, .completeFileProtection])
@@ -151,6 +198,30 @@ import CardScoutCore
         let old = library; update(&library)
         do { try persist() } catch { library = old; lastError = "Speichern fehlgeschlagen. Bitte erneut versuchen." }
     }
+    @discardableResult func removeCard(_ id: String) -> Bool {
+        saveCardMove(error: "Karte konnte nicht entfernt werden.") { try $0.removeCard(id) }
+    }
+    @discardableResult func restoreCard(_ id: String) -> Bool {
+        if library.removedCards?.first(where: { $0.id == id })?.awaitingBack == true, pendingCapturePair != nil {
+            lastError = "Schließe zuerst den aktuellen Scan ab."
+            return false
+        }
+        return saveCardMove(error: "Karte konnte nicht wiederhergestellt werden.") { try $0.restoreCard(id) }
+    }
+    private func saveCardMove(error message: String, _ change: (inout Library) throws -> Void) -> Bool {
+        let before = library
+        do {
+            try change(&library)
+            try persist()
+            recordPortfolioObservation()
+            Task { await sync() }
+            return true
+        } catch {
+            library = before
+            lastError = message
+            return false
+        }
+    }
     func photoURL(_ name: String?) -> URL? {
         guard let name else { return nil }
         return try? disk?.photoURL(name)
@@ -172,6 +243,10 @@ import CardScoutCore
         library = try disk.beginCapturePair(capture, sessionID: captureSessionID, in: library, mode: mode)
         return library.cards[0].id
     }
+    func replacePendingFront(_ id: String, with capture: CapturePhoto) throws {
+        guard writable, let disk else { throw CocoaError(.fileWriteNoPermission) }
+        library = try disk.replacePendingFront(cardID: id, with: capture, in: library)
+    }
     func finishCapturePair(_ id: String, back: Data?, text: String? = nil) throws {
         guard writable, let disk else { throw CocoaError(.fileWriteNoPermission) }
         library = try disk.finishCapturePair(cardID: id, back: back, text: text, in: library)
@@ -186,10 +261,31 @@ import CardScoutCore
             return true
         } catch { library = previous; lastError = "Karte konnte nicht einsortiert werden."; return false }
     }
-    func selectVariant(_ id: String, variantID: String) {
+    func saveReviewChange(_ change: (inout Library) throws -> Void) -> Bool {
+        let previous = library
+        do { try change(&library); try persist(); return true }
+        catch { library = previous; lastError = "Zuordnung konnte nicht gespeichert werden."; return false }
+    }
+    @discardableResult func selectVariant(_ id: String, variantID: String) -> Bool {
         let old = library
-        do { try library.selectCardSightVariant(cardID: id, variantID: variantID); try persist(); Task { await sync() } }
-        catch { library = old; lastError = "Zuordnung konnte nicht gespeichert werden." }
+        do { try library.selectCardSightVariant(cardID: id, variantID: variantID); try persist(); Task { await sync() }; return true }
+        catch { library = old; lastError = "Zuordnung konnte nicht gespeichert werden."; return false }
+    }
+    func addTilt(_ data: Data, cardID: String, jobID: String) {
+        guard writable, let disk else { return }
+        do { library = try disk.addTilt(data, cardID: cardID, jobID: jobID, in: library); Task { await sync() } }
+        catch { lastError = "Zusatzfoto konnte nicht gespeichert werden." }
+    }
+    func acceptPhotoMatch(_ id: String, jobID: String) {
+        commit { library in
+            guard let i = library.cards.firstIndex(where: { $0.id == id && $0.jobID == jobID && $0.hasCurrentAnalysis }),
+                  let proposed = library.cards[i].proposedPhotoMatch, proposed.identityConfirmed == true else { return }
+            library.cards[i].analysis = proposed
+            library.cards[i].manualAssignment = false
+            library.cards[i].userSelectedEdition = true
+            library.cards[i].scanSelection = nil
+            library.cards[i].proposedPhotoMatch = nil
+        }
     }
     func correctAssignment(_ id: String, collectionID: String, number: String) -> Bool {
         let old = library
@@ -199,6 +295,7 @@ import CardScoutCore
     @discardableResult func saveManualBurnValue(_ amountCents: Int?, currency: String) -> Bool {
         let old = library
         do {
+            library.burnManualValues = nil
             try library.setManualBurnValue(amountCents: amountCents, currency: currency)
             try persist()
             return true
@@ -250,9 +347,17 @@ import CardScoutCore
             try persist(); return true
         } catch { library = old; lastError = "Notizen konnten nicht gespeichert werden."; return false }
     }
-    func receivePairing(_ url: URL) {
-        do { pairingCandidate = try Pairing.parse(url); showSettings = true; recordConnectionStatus("candidate") }
-        catch { lastError = "Dieser Verbindungscode ist ungültig." }
+    @discardableResult
+    func receivePairing(_ url: URL, reportError: Bool = true) -> Bool {
+        do {
+            pairingCandidate = try Pairing.parse(url)
+            openConnectionSettings()
+            recordConnectionStatus("candidate")
+            return true
+        } catch {
+            if reportError { lastError = "Dieser Verbindungscode ist ungültig." }
+            return false
+        }
     }
     func receiveURL(_ url: URL) {
         if let product = MarketSnapshot.deepLinkProduct(url) {
@@ -311,7 +416,7 @@ import CardScoutCore
         catch { lastError = "Verbindung konnte nicht sicher gespeichert werden." }
     }
     func retry(_ id: String) {
-        guard let client else { showSettings = true; return }
+        guard let client else { openConnectionSettings(); return }
         guard let card = library.cards.first(where: { $0.id == id }) else { return }
         let jobID = card.jobID
         Task {
@@ -349,7 +454,7 @@ import CardScoutCore
         } catch { chaseError = "Preiskatalog gerade nicht aktualisierbar." }
     }
     func reloadChases() async {
-        guard let client else { showSettings = true; return }
+        guard let client else { openConnectionSettings(); return }
         do {
             let capabilities: [String: String] = try await client.request("/v1/ping")
             await refreshChases(revision: capabilities["chaseRevision"], force: true)
@@ -401,7 +506,8 @@ import CardScoutCore
             if !library.importedLegacy {
                 let bootstrap: Bootstrap = try await client.request("/v1/bootstrap")
                 var incoming: [OwnedCard] = []
-                for item in bootstrap.cards where !library.cards.contains(where: { $0.id == item.record.id }) {
+                let localIDs = Set(library.cards.map(\.id)).union(library.removedCardIDs)
+                for item in bootstrap.cards where !localIDs.contains(item.record.id) {
                     guard let front = Data(base64Encoded: item.front), UIImage(data: front) != nil else { throw StoreError.missingFront }
                     var card = item.record; card.frontFile = card.id + "-front.jpg"
                     try disk.writePhoto(front, name: card.frontFile)
@@ -422,11 +528,7 @@ import CardScoutCore
             if capabilities["matchPipelineVersion"] == "1" && (!loadedMatchChecklists || loadedReferenceRevision != capabilities["referenceImagesRevision"] || loadedCatalogRevision != capabilities["catalogRevision"]) {
                 let checklists: [CardCollection] = try await client.request("/v1/checklists")
                 let previous = library
-                for checklist in checklists {
-                    if let index = library.collections.firstIndex(where: { $0.id == checklist.id }) {
-                        if !library.collections[index].checklistComplete || checklist.checklistComplete { library.collections[index] = checklist }
-                    } else { library.collections.append(checklist) }
-                }
+                library.mergeChecklists(checklists)
                 do { try persist(); loadedMatchChecklists = true; loadedReferenceRevision = capabilities["referenceImagesRevision"]; loadedCatalogRevision = capabilities["catalogRevision"] } catch { library = previous; throw error }
             }
             // One-time upgrade of older assessments, with stable card IDs and unchanged photo files.
@@ -509,17 +611,14 @@ import CardScoutCore
                 let _: [String: String] = try await client.request("/v1/jobs/\(id)/ack", method: "POST", body: Data("{}".utf8))
                 commit { $0.pendingAcknowledgments?.removeAll { $0 == id } }
             }
-            // Fill missing estimates in the background, once per job per session.
-            // The worker reuses fresh results and enforces shared provider limits.
             let priceSlots = max(0, 6 - loadingCardPrices.count)
-            let eligible = library.cards.filter { $0.hasCurrentAnalysis && $0.unpricedBaseValue() == nil }
-            let firstChecks = eligible.filter { !hydratedCardPriceJobs.contains($0.jobID) }
-            let dueChecks = eligible.filter { hydratedCardPriceJobs.contains($0.jobID) && (nextPriceChecks[$0.jobID].map { $0 <= Date() } ?? false) }
-            for card in (firstChecks + dueChecks).prefix(priceSlots) {
+            let pending = dashboardValueCache.pendingPriceChecks(in: library, limit: priceSlots,
+                loading: loadingCardPrices, checked: hydratedCardPriceJobs, retryAfter: nextPriceChecks)
+            for card in pending {
                 hydratedCardPriceJobs.insert(card.jobID)
                 nextPriceChecks.removeValue(forKey: card.jobID)
-                let cachedOnly = dashboardValueCache.isFresh(card)
-                Task { await loadCardPrices(card.id, cachedOnly: cachedOnly) }
+                // The worker coalesces requests and searches only when its exact-edition cache lacks a quote.
+                Task { await loadCardPrices(card.id) }
             }
             // Reference refresh is optional and never blocks photo submission or result persistence.
             await refreshChases(revision: capabilities["chaseRevision"])
@@ -535,28 +634,34 @@ import CardScoutCore
 
     private func recordPortfolioObservation() {
         guard writable, loadingCardPrices.isEmpty,
-              client == nil || library.collectedCards.filter({ $0.hasCurrentAnalysis && $0.analysis?.identityConfirmed == true && $0.analysis?.knownIdentityConflict == nil }).allSatisfy({ observedPriceJobs.contains($0.jobID) || dashboardValueCache.isFresh($0) || $0.unpricedBaseValue() != nil }) else { return }
+              client == nil || library.collectedCards.filter({ $0.hasCurrentAnalysis && $0.analysis?.identityConfirmed == true && $0.analysis?.knownIdentityConflict == nil }).allSatisfy({ !$0.canRequestPrices || observedPriceJobs.contains($0.jobID) || dashboardValueCache.isFresh($0) || $0.unpricedBaseValue() != nil }) else { return }
         let old = library.portfolioHistory
         guard library.recordPortfolioObservation(cachedValues: dashboardValueCache.portfolioValues(in: library)) else { return }
         do { try persist() }
         catch { library.portfolioHistory = old; lastError = "Wertverlauf konnte nicht gespeichert werden." }
     }
 
+    private func awaitsScoutValue(_ analysis: CardAnalysis?) -> Bool {
+        guard let analysis, analysis.cardSightIdentity != nil, analysis.serialNumber == nil else { return false }
+        return analysis.cardScoutValue() == nil && analysis.askingSummary != nil
+    }
+
     func loadCardPrices(_ cardID: String, cachedOnly: Bool = false) async {
         guard let client, let card = library.cards.first(where: { $0.id == cardID }), card.hasCurrentAnalysis,
-              loadingCardPrices.insert(card.jobID).inserted else { return }
+              card.canRequestPrices, loadingCardPrices.insert(card.jobID).inserted else { return }
         defer {
             loadingCardPrices.remove(card.jobID)
             recordPortfolioObservation()
         }
         do {
-            var job: MacJob
-            if cachedOnly { job = try await client.request("/v1/jobs/\(card.jobID)") }
-            else { job = try await client.request("/v1/jobs/\(card.jobID)/prices", method: "POST", body: Data("{}".utf8)) }
+            var job = try await client.priceJob(for: card, cachedOnly: cachedOnly)
+            if cachedOnly && job.priceStatus == "empty" {
+                job = try await client.priceJob(for: card, cachedOnly: false)
+            }
             priceStates[card.jobID] = job.priceStatus ?? "empty"
-            for _ in 0..<25 where !cachedOnly && job.priceStatus == "refreshing" {
+            for _ in 0..<25 where job.priceStatus == "refreshing" {
                 try await Task.sleep(for: .seconds(1))
-                job = try await client.request("/v1/jobs/\(card.jobID)")
+                job = try await client.priceJob(for: card, cachedOnly: true)
             }
             priceStates[card.jobID] = job.priceStatus ?? "empty"
             if ["no_match", "unavailable"].contains(job.priceStatus ?? "") {
@@ -568,13 +673,11 @@ import CardScoutCore
                 hydratedCardPriceJobs.remove(card.jobID)
                 return
             }
-            guard !Task.isCancelled, job.id == card.jobID, job.status == "analyzed",
+            guard !Task.isCancelled, job.status == "analyzed",
                   let incoming = job.analysis, (incoming.identityConfirmed == true || incoming.cardSightIdentity != nil),
                   let index = library.cards.firstIndex(where: { $0.id == cardID && $0.jobID == card.jobID }),
                   let current = library.cards[index].analysis,
-                  current.player == incoming.player, current.year == incoming.year, current.setName == incoming.setName,
-                  current.subset == incoming.subset, current.cardNumber == incoming.cardNumber,
-                  current.parallel == incoming.parallel, current.serialNumber == incoming.serialNumber else { return }
+                  library.cards[index].acceptsPrices(from: job.id, analysis: incoming) else { return }
             observedPriceJobs.insert(card.jobID)
             // Only pricing changes here. Identity, photos and saved assessment stay intact.
             var updated = current
@@ -582,12 +685,16 @@ import CardScoutCore
             updated.comparableEstimate = incoming.comparableEstimate
             updated.unpricedBaseExpiresAt = job.priceStatus == "no_match" && current.cardSightIdentity == incoming.cardSightIdentity
                 ? incoming.unpricedBaseExpiresAt : nil
-            let expiries = (incoming.insights?.marketReferences.compactMap(\.expiresAt) ?? []) + [incoming.comparableEstimate?.expiresAt].compactMap { $0 }
+            let expiries = (incoming.insights?.marketReferences.compactMap(\.expiresAt) ?? []) +
+                [incoming.comparableEstimate?.expiresAt, incoming.insights?.scoutEstimate?.expiresAt].compactMap { $0 }
             if let expiry = expiries.min(), ["ready", "estimate"].contains(job.priceStatus ?? "") {
-                nextPriceChecks[card.jobID] = Date(timeIntervalSince1970: expiry + 1)
+                let refresh = Date(timeIntervalSince1970: expiry + 1)
+                nextPriceChecks[card.jobID] = awaitsScoutValue(incoming) ? min(refresh, Date().addingTimeInterval(900)) : refresh
             }
-            if let info = incoming.insights, var existing = updated.insights {
+            if let info = incoming.insights {
+                var existing = updated.insights ?? .pricingOnly
                 existing.marketReferences = info.marketReferences
+                existing.scoutEstimate = info.scoutEstimate
                 existing.marketBullets = info.marketBullets
                 existing.sourceChecks = info.sourceChecks
                 updated.insights = existing
@@ -630,11 +737,11 @@ import CardScoutCore
             if ["ready", "estimate", "no_match"].contains(job.priceStatus ?? "") {
                 // A failed connection never clears the last displayed amount.
                 // A completed empty result can remove a previous estimate.
-                let value = CollectionStatistics(library: library, includePersonal: false).values.first { $0.cardID == cardID }
-                dashboardValueCache.update(card: library.cards[index], value: value,
-                    refreshAfter: nextPriceChecks[card.jobID] ?? Date().addingTimeInterval(86400),
-                    portfolioValue: library.cards[index].personalPrice == nil ? library.portfolioValues().first { $0.cardID == cardID } : nil)
-                try? disk?.saveDashboardValues(dashboardValueCache)
+                let previousCache = dashboardValueCache
+                dashboardValueCache.updatePrices(for: library.cards[index],
+                    refreshAfter: nextPriceChecks[card.jobID] ?? Date().addingTimeInterval(86400))
+                do { try disk?.saveDashboardValues(dashboardValueCache) }
+                catch { dashboardValueCache = previousCache; throw error }
             }
         } catch {
             // A transport failure is not a completed lookup. Retry after a short

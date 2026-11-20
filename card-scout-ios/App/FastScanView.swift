@@ -5,7 +5,7 @@ import Observation
 import Vision
 import CardScoutCore
 
-private func capturePhoto(_ bytes: Data) -> CapturePhoto? {
+func capturePhoto(_ bytes: Data) -> CapturePhoto? {
     guard let jpeg = normalizedJPEG(bytes) else { return nil }
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
@@ -15,7 +15,7 @@ private func capturePhoto(_ bytes: Data) -> CapturePhoto? {
     return CapturePhoto(front: jpeg, text: text.map { String($0.prefix(2000)) })
 }
 
-private final class CaptureDriver: NSObject, AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+final class CaptureDriver: NSObject, AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "cardscout.capture", qos: .userInitiated)
     private let photo = AVCapturePhotoOutput()
@@ -180,7 +180,7 @@ private final class CaptureDriver: NSObject, AVCapturePhotoCaptureDelegate, AVCa
     }
 }
 
-@MainActor @Observable private final class CaptureCamera {
+@MainActor @Observable final class CaptureCamera {
     var torchAvailable = false
     var torchOn = false
     var ready = false
@@ -274,11 +274,11 @@ private final class CaptureDriver: NSObject, AVCapturePhotoCaptureDelegate, AVCa
     }
 }
 
-private final class PreviewSurface: UIView {
+final class PreviewSurface: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     var preview: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
 }
-private struct CameraPreview: UIViewRepresentable {
+struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
     let frame: ScanCardFrame?
     let imageSize: CGSize
@@ -327,6 +327,7 @@ struct PortraitCameraView: View {
     @State private var camera = CaptureCamera(automatic: false)
     @State private var captured: Data?
     @State private var capturedRevision = UUID()
+    var tilted = false
     let completed: (Data?) -> Void
 
     var body: some View {
@@ -349,7 +350,7 @@ struct PortraitCameraView: View {
                     }
                     .aspectRatio(3.0 / 4.0, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 18))
-                    Text(tr("iPhone hochkant halten. Alle vier Ecken und den Text scharf aufnehmen."))
+                    Text(trDisplay(tilted ? "Tilt the card slightly" : "iPhone hochkant halten. Alle vier Ecken und den Text scharf aufnehmen."))
                         .font(.footnote).foregroundStyle(Color.scoutMuted)
                     if let error = camera.error { Text(trDisplay(error)).font(.footnote).foregroundStyle(Color.scoutGold) }
                     if let captured {

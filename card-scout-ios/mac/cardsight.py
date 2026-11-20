@@ -313,7 +313,8 @@ class Client:
         if path == "/v1/pricing/search":
             if (not isinstance(params, dict) or set(params) != {"q", "period", "listing_type", "limit"}
                     or not isinstance(params.get("q"), str) or not 2 <= len(params["q"]) <= 300
-                    or params.get("period") not in ("90d", "1y") or params.get("listing_type") != "auction" or params.get("limit") != 25):
+                    or (params.get("period"), params.get("listing_type")) not in (("90d", "auction"), ("1y", "auction"), ("90d", "fixed"))
+                    or params.get("limit") != 25):
                 raise MarketError("Unsichere Verkaufssuche abgelehnt.")
         if method == "POST" and not identify:
             if (not isinstance(body, dict) or not 1 <= len(body.get("card_ids", [])) <= 100

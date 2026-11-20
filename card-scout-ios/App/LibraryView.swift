@@ -7,10 +7,15 @@ struct LibraryView: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @ScaledMetric(relativeTo: .body) private var tileWidth = 108.0
     @State private var adding = false
+    @State private var showingRemovedCards = false
     @State private var finishingUnclear = false
     @State private var search = ""
+    @State private var searchOpen = false
+    @State private var inboxOpen = false
+    @FocusState private var searching: Bool
     @State private var filter = "Binder"
     @State private var sort = "Neueste"
+    @State private var selectedBinderID: String?
     private var pending: [OwnedCard] { store.library.cards.filter(\.isAwaitingAnalysis) }
     private var review: [OwnedCard] { store.library.cards.filter { !$0.isAwaitingAnalysis && collectorNeedsAttention($0) } }
     private var visible: [OwnedCard] {
@@ -37,39 +42,30 @@ struct LibraryView: View {
         return cards
     }
     private func displayedPrice(_ card: OwnedCard) -> (currency: String, cents: Double)? {
-        if let price = card.personalPrice, price.isValid { return (price.currency, Double(price.amountCents)) }
-        if card.hasDisplayableAnalysis, let summary = card.analysis?.valuationSummary {
-            return (summary.primary.currency, summary.orderingValueCents)
+        if let value = store.dashboardValueCache.collectionQuote(for: card) {
+            return (value.currency, Double(value.amountCents))
         }
-        return store.unpricedBaseDisplayValue(for: card).map { ($0.currency, Double($0.lowCents)) }
+        return nil
     }
-    private var collections: [CardCollection] {
-        store.library.collections.sorted { $0.year == $1.year ? $0.name < $1.name : $0.year > $1.year }
-    }
+    private let collectionFilters = ["Binder", "Alle", "Collectibles", "Favoriten", "Ordner", "Offen"]
+    private var onBinderShelf: Bool { filter == "Binder" && search.isEmpty }
 
     var body: some View {
         @Bindable var store = store
         TabView(selection: $store.selectedTab) {
             NavigationStack {
                 ClubhouseHomeView()
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button { store.showSettings = true } label: { Image(systemName: "gearshape").frame(width: 32, height: 32) }
-                                .accessibilityLabel(tr("Verbindung und Einstellungen"))
-                        }
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button { store.selectedTab = 3 } label: { Image(systemName: "viewfinder").frame(width: 32, height: 32) }
-                                .accessibilityLabel(tr("Karte scannen"))
-                        }
-                    }
-            }.tabItem { Label(tr("Clubhaus"), systemImage: "house.fill") }.tag(0)
+            }.collectorTabSurface().tabItem {
+                CollectorTabLabel(title: tr("Clubhaus"), icon: "house", selectedIcon: "house.fill", selected: store.selectedTab == 0)
+            }.tag(0)
             NavigationStack {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        #if DEBUG
-                        if PreviewData.enabled { Text(tr("DESIGN-VORSCHAU · DEMODATEN")).font(.caption2.monospaced()).foregroundStyle(Color.scoutMuted) }
-                        #endif
-                        HStack {
+                        if !onBinderShelf {
+                            #if DEBUG
+                            if PreviewData.enabled { Text(tr("DESIGN-VORSCHAU · DEMODATEN")).font(.caption2.monospaced()).foregroundStyle(Color.scoutMuted) }
+                            #endif
+                            HStack {
                                 Text(tr("\(store.library.collectedCards.count) Karten · \(store.library.binders.count) Binder")).font(.subheadline).foregroundStyle(Color.scoutMuted)
                                 Spacer()
                                 Menu {
@@ -77,14 +73,15 @@ struct LibraryView: View {
                                 } label: { Image(systemName: "line.3.horizontal.decrease").frame(width: 44, height: 44) }
                                     .accessibilityLabel(tr("Sammlung sortieren"))
                             }
-                        nextSteps
-                        ScrollView(.horizontal) {
-                            HStack(spacing: 8) {
-                                ForEach(["Binder", "Alle", "Collectibles", "Favoriten", "Ordner", "Offen"], id: \.self) { value in
-                                    Button { filter = value } label: { ScoutChip(trDisplay(value), selected: filter == value) }.buttonStyle(.plain)
+                            nextSteps
+                            ScrollView(.horizontal) {
+                                HStack(spacing: 8) {
+                                    ForEach(collectionFilters, id: \.self) { value in
+                                        Button { filter = value } label: { ScoutChip(trDisplay(value), selected: filter == value) }.buttonStyle(.plain)
+                                    }
                                 }
-                            }
-                        }.scrollIndicators(.hidden)
+                            }.scrollIndicators(.hidden)
+                        }
                         if filter == "Ordner" {
                             if (store.library.folders ?? []).isEmpty { Text(tr("Wähle nach dem Scan einen Ordner oder lege einen neuen an.")).foregroundStyle(Color.scoutMuted) }
                             ForEach(store.library.folders ?? []) { folder in
@@ -93,14 +90,21 @@ struct LibraryView: View {
                                         .padding(.vertical, 12)
                                 }
                             }
-                        } else if filter == "Binder" && search.isEmpty {
-                            if collections.isEmpty { ScoutEmptyState(symbol: "books.vertical", title: tr("Keine Binder"), message: tr("")) }
-                            else {
-                                LazyVStack(spacing: 14) {
-                                    ForEach(store.library.binders) { binder in
-                                        NavigationLink { BinderContentsView(binderID: binder.id) } label: { BinderCover(binder: binder) }.buttonStyle(.plain)
-                                    }
+                        } else if onBinderShelf {
+                            let binders = store.library.binders
+                            if binders.isEmpty {
+                                ScoutEmptyState(symbol: "books.vertical", title: tr("Keine Binder"))
+                                if store.library.collectedCards.isEmpty {
+                                    Button { store.selectedTab = 3 } label: {
+                                        Label(tr("Karten scannen"), systemImage: "viewfinder")
+                                    }.buttonStyle(ScoutPrimaryButtonStyle())
+                                } else {
+                                    Button { filter = "Alle" } label: {
+                                        Label(tr("Alle Karten zeigen"), systemImage: "rectangle.grid.2x2")
+                                    }.buttonStyle(ScoutSecondaryButtonStyle())
                                 }
+                            } else {
+                                BinderCarousel(binders: binders, selectedID: $selectedBinderID)
                             }
                         } else if visible.isEmpty {
                             ScoutEmptyState(symbol: filter == "Collectibles" ? "trophy" : filter == "Favoriten" ? "star" : "rectangle.stack", title: search.isEmpty ? (filter == "Collectibles" ? "Deine Collectibles." : filter == "Favoriten" ? "Deine Favoriten." : "Keine Karten") : "Keine Treffer.", message: search.isEmpty ? (filter == "Collectibles" ? "Markiere deine Lieblingsstücke mit der Trophäe in den Kartendetails." : "Scanne deine erste Karte oder wähle Fotos aus.") : nil)
@@ -120,7 +124,7 @@ struct LibraryView: View {
                                 }
                             }
                         }
-                        if !review.isEmpty && filter != "Offen" {
+                        if !onBinderShelf && !review.isEmpty && filter != "Offen" {
                             Button { filter = "Offen" } label: {
                                 HStack { Text(tr("\(review.count) Zuordnungen prüfen")); Spacer(); Image(systemName: "arrow.right") }
                                     .font(.subheadline).padding(.vertical, 16)
@@ -129,28 +133,26 @@ struct LibraryView: View {
                     }.padding(.horizontal, 20).padding(.bottom, 28)
                 }
                 .background(Color.scoutCanvas)
-                .navigationTitle(tr("Sammlung"))
                 .navigationBarTitleDisplayMode(.inline)
-                .searchable(text: $search, prompt: tr("Spieler, Set, Team oder Box"))
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button { store.showSettings = true } label: { Image(systemName: store.connected ? "desktopcomputer" : "wifi.slash").foregroundStyle(Color.scoutMuted).frame(width: 32, height: 32) }
-                            .accessibilityLabel(tr("Verbindung und Einstellungen"))
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            Button(tr("Mehrere Karten scannen"), systemImage: "viewfinder") { store.selectedTab = 3 }
-                            Button(tr("Vorder- und Rückseite"), systemImage: "rectangle.on.rectangle") { adding = true }
-                        } label: { Image(systemName: "plus").frame(width: 32, height: 32) }
-                            .accessibilityLabel(tr("Karten hinzufügen"))
-                    }
+                .toolbar(.hidden, for: .navigationBar)
+                .safeAreaInset(edge: .top, spacing: 0) { collectionHeader }
+                .navigationDestination(isPresented: $inboxOpen) {
+                    ScrollView { nextStepActions.padding(20) }.navigationTitle(tr("Eingang"))
                 }
+                .navigationDestination(isPresented: $showingRemovedCards) { RemovedCardsView() }
                 .navigationDestination(for: String.self) { CardDetailView(cardID: $0) }
                 .refreshable { await store.sync() }
-            }.tabItem { Label(tr("Sammlung"), systemImage: "square.grid.2x2") }.tag(5)
-            NavigationStack { FastScanView() }.tabItem { Label(tr("Scannen"), systemImage: "viewfinder") }.tag(3)
-            NavigationStack { CollectionStatisticsView() }.tabItem { Label(tr("Insights"), systemImage: "chart.bar.xaxis") }.tag(4)
+            }.collectorTabSurface().tabItem {
+                CollectorTabLabel(title: tr("Sammlung"), icon: "rectangle.stack", selectedIcon: "rectangle.stack.fill", selected: store.selectedTab == 5)
+            }.tag(5)
+            NavigationStack { PackStudioView() }.collectorTabSurface().tabItem {
+                CollectorTabLabel(title: tr("Scannen"), icon: "viewfinder", selectedIcon: "camera.viewfinder", selected: store.selectedTab == 3)
+            }.tag(3)
+            NavigationStack { CollectionStatisticsView().toolbar(.hidden, for: .navigationBar) }.collectorTabSurface().tabItem {
+                CollectorTabLabel(title: tr("Insights"), icon: "chart.bar", selectedIcon: "chart.bar.fill", selected: store.selectedTab == 4)
+            }.tag(4)
         }
+        .modifier(CollectorTabBehavior())
         .tint(.scoutAccent)
         .sheet(isPresented: $adding) { AddCardView() }
         .sheet(isPresented: $store.showMarketRanking) {
@@ -159,47 +161,104 @@ struct LibraryView: View {
             }
         }
         .sheet(isPresented: $finishingUnclear) { UnclearCardQueueView() }
-        .sheet(isPresented: $store.showSettings) { ConnectionView() }
+        .sheet(isPresented: $store.showSettings, onDismiss: { store.showConnectionSettings = false }) { ConnectionView() }
         .alert(tr("Bitte prüfen"), isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.lastError = nil } })) {
             Button(tr("OK")) { store.lastError = nil }
         } message: { Text(trDisplay(store.lastError ?? "")) }
     }
 
+    private var collectionHeader: some View {
+        VStack(spacing: 0) {
+            CollectorHeader {
+                Menu {
+                    Picker(tr("Sammlung"), selection: $filter) {
+                        ForEach(collectionFilters, id: \.self) { value in Text(trDisplay(value)).tag(value) }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        CollectorHeading(text: onBinderShelf ? tr("Meine Binder") : tr("Sammlung"))
+                        Image(systemName: "chevron.down").font(.caption2.bold()).foregroundStyle(Color.scoutMuted)
+                    }.frame(minHeight: 44)
+                }.accessibilityLabel(tr("Collection view")).accessibilityValue(trDisplay(filter))
+                    .accessibilityIdentifier("shell.collection.filter")
+            } actions: {
+                Button {
+                    if searchOpen { closeSearch() }
+                    else { searchOpen = true; searching = true }
+                } label: { CollectorToolIcon(name: searchOpen ? "xmark" : "magnifyingglass") }
+                    .accessibilityLabel(searchOpen ? tr("Schließen") : tr("Search collection"))
+                    .accessibilityIdentifier("shell.collection.search")
+                Menu {
+                    Button(tr("Eingang"), systemImage: "tray") { inboxOpen = true }
+                    Button(tr("Entfernte Karten"), systemImage: "trash") { showingRemovedCards = true }
+                    Divider()
+                    Button(tr("Mehrere Karten scannen"), systemImage: "viewfinder") { store.selectedTab = 3 }
+                    Button(tr("Vorder- und Rückseite"), systemImage: "rectangle.on.rectangle") { adding = true }
+                } label: { CollectorToolIcon(name: "ellipsis") }
+                    .accessibilityLabel(tr("Collection actions")).accessibilityIdentifier("shell.collection.actions")
+            }
+            if searchOpen {
+                HStack(spacing: 9) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(Color.scoutMuted)
+                    TextField(tr("Spieler, Set, Team oder Box"), text: $search)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .focused($searching).submitLabel(.search).onSubmit { searching = false }
+                    if !search.isEmpty {
+                        Button { search = ""; searching = true } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(Color.scoutMuted).frame(width: 44, height: 44)
+                        }.accessibilityLabel(tr("Suche löschen"))
+                    }
+                }.padding(.horizontal, 12).frame(minHeight: 44)
+                    .background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal, 14).padding(.vertical, 6)
+                    .background(Color.scoutCanvas)
+            }
+        }
+    }
+
+    private func closeSearch() {
+        searching = false
+        search = ""
+        searchOpen = false
+    }
+
     private var nextSteps: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 12) {
-                if !store.library.scanDrafts.isEmpty {
-                    NavigationLink { ScanDraftsView() } label: {
-                        Label(tr("\(store.library.scanDrafts.count) Scans vergleichen"), systemImage: "rectangle.stack.badge.plus")
-                            .font(.headline).padding(16).frame(maxWidth: .infinity, alignment: .leading).background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 12))
-                    }.buttonStyle(.plain)
-                }
-                if !pending.isEmpty { progressStrip }
-                NavigationLink { ReviewQueueView() } label: {
-                    Label(tr("Nächste Schritte · Zuordnung & Preise"), systemImage: "checklist")
-                        .font(.headline).padding(16).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 12))
-                }.buttonStyle(.plain)
-                if store.library.unclearCardQueue?.currentID != nil || store.library.cards.contains(where: UnclearCardQueue.isEligible) {
-                    Button {
-                        if store.startUnclearCardQueue() { finishingUnclear = true }
-                    } label: {
-                        HStack(spacing: 14) {
-                            Image(systemName: "rectangle.stack.badge.plus").font(.title2)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(trDisplay(store.library.unclearCardQueue?.currentID == nil ? "Offene Karten fertigstellen" : "Offene Karten fortsetzen")).font(.subheadline.weight(.semibold))
-                                Text(tr("Fotos, Checkliste oder Variante prüfen · Karte für Karte")).font(.caption).foregroundStyle(Color.scoutMuted)
-                            }
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right").font(.caption)
-                        }.padding(16).background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 12))
-                    }.buttonStyle(.plain).foregroundStyle(Color.scoutAccent)
-                }
-            }.padding(.top, 12)
-        } label: {
+        DisclosureGroup { nextStepActions } label: {
             Label(tr("Eingang & nächste Schritte · \(pending.count + review.count + store.library.scanDrafts.count)"), systemImage: "tray")
                 .font(.subheadline.weight(.medium))
         }
+    }
+
+    private var nextStepActions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !store.library.scanDrafts.isEmpty {
+                NavigationLink { ScanDraftsView() } label: {
+                    Label(tr("\(store.library.scanDrafts.count) Scans vergleichen"), systemImage: "rectangle.stack.badge.plus")
+                        .font(.headline).padding(16).frame(maxWidth: .infinity, alignment: .leading).background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 12))
+                }.buttonStyle(.plain)
+            }
+            if !pending.isEmpty { progressStrip }
+            NavigationLink { ReviewQueueView() } label: {
+                Label(tr("Nächste Schritte · Zuordnung & Preise"), systemImage: "checklist")
+                    .font(.headline).padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 12))
+            }.buttonStyle(.plain)
+            if store.library.unclearCardQueue?.currentID != nil || store.library.cards.contains(where: UnclearCardQueue.isEligible) {
+                Button {
+                    if store.startUnclearCardQueue() { finishingUnclear = true }
+                } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: "rectangle.stack.badge.plus").font(.title2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(trDisplay(store.library.unclearCardQueue?.currentID == nil ? "Offene Karten fertigstellen" : "Offene Karten fortsetzen")).font(.subheadline.weight(.semibold))
+                            Text(tr("Fotos, Checkliste oder Variante prüfen · Karte für Karte")).font(.caption).foregroundStyle(Color.scoutMuted)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").font(.caption)
+                    }.padding(16).background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 12))
+                }.buttonStyle(.plain).foregroundStyle(Color.scoutAccent)
+            }
+        }.padding(.top, 12)
     }
 
     private var progressStrip: some View {
@@ -219,11 +278,18 @@ struct LibraryView: View {
 }
 
 private func collectorNeedsAttention(_ card: OwnedCard) -> Bool {
-    card.isAwaitingAnalysis || ReviewIssue.identity(card) != nil || card.analysis?.collectionID == nil || (card.analysis?.needsReview == true && card.manualAssignment != true)
+    if card.automaticScan == true || card.analysis?.finishPolicy != nil {
+        return card.isAwaitingAnalysis || card.state == "failed" || card.awaitingBack == true || card.canAddTilt
+    }
+    return card.isAwaitingAnalysis || ReviewIssue.identity(card) != nil || card.analysis?.collectionID == nil || (card.analysis?.needsReview == true && card.manualAssignment != true)
 }
 
 private func collectorStatus(_ card: OwnedCard) -> String {
-    switch card.state {
+    if card.hasCurrentAnalysis, card.automaticScan == true || card.analysis?.finishPolicy != nil {
+        if card.canAddTilt { return "Tilt the card slightly" }
+        return card.analysis?.identityConfirmed == true ? "In deiner Sammlung" : "Finish open"
+    }
+    return switch card.state {
     case "queued": "Analyse vorgemerkt"
     case "processing": "Wird erkannt"
     case "identified": card.analysis?.identityConfirmed == true ? "Erkannt · Preis folgt" : "Zuordnung prüfen · vorläufig"
@@ -251,39 +317,6 @@ private struct CardInboxView: View {
             }.padding(20)
         }.background(Color.scoutCanvas).navigationTitle(tr("Eingang")).navigationBarTitleDisplayMode(.inline)
             .refreshable { await store.sync() }
-    }
-}
-
-struct CollectionCover: View {
-    @Environment(AppStore.self) private var store
-    let collection: CardCollection
-    private var count: Int { collection.ownedCount(in: store.library.cards) }
-    private var cover: OwnedCard? { store.library.collectedCards.first { $0.analysis?.collectionID == collection.id && $0.analysis?.identityConfirmed == true } }
-    var body: some View {
-        HStack(spacing: 16) {
-            if cover == nil, let reference = collection.validReferenceExample {
-                VStack(spacing: 2) {
-                    ReferenceImageView(url: reference.frontURL).frame(width: 62, height: 80)
-                    Text(tr("Beispiel")).font(.system(size: 8)).foregroundStyle(Color.scoutMuted)
-                }
-            } else {
-                OwnedPhoto(name: cover?.frontFile, number: "").frame(width: 62, height: 88)
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                Text(tr("\(String(collection.year)) · \(collection.brand)")).font(.caption).foregroundStyle(Color.scoutMuted)
-                Text(trDisplay(collection.parallel ?? collection.subset)).font(.system(.title3, design: .rounded, weight: .heavy)).foregroundStyle(Color.scoutInk)
-                Text(collection.name).font(.caption).foregroundStyle(Color.scoutMuted)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            VStack(alignment: .trailing, spacing: 7) {
-                Text(trDisplay(collection.checklistComplete ? "\(count) / \(collection.cards.count)" : "\(count) Motive")).font(.caption.monospacedDigit()).foregroundStyle(Color.scoutInk)
-                if collection.checklistComplete { ProgressView(value: Double(count), total: Double(max(collection.cards.count, 1))).tint(.scoutAccent).frame(width: 66) }
-                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(Color.scoutMuted)
-            }
-        }.padding(16)
-            .background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.scoutLine.opacity(0.5)))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(tr("\(String(collection.year)) \(collection.name), \(collection.parallel ?? collection.subset). \(count) gesammelt\(collection.checklistComplete ? " von \(collection.cards.count)" : ", Checkliste offen"). Binder öffnen"))
     }
 }
 
@@ -327,15 +360,9 @@ struct OwnedTile: View {
                 Text(trDisplay([a.cardNumber.map { "#" + $0 }, a.parallel ?? a.subset, a.rookie == true ? "RC" : nil].compactMap { $0 }.joined(separator: " · ")))
                     .font(.caption).foregroundStyle(Color.scoutMuted).lineLimit(2)
             }
-            if let price = card.personalPrice, price.isValid {
-                Text(CollectionCardValue.money(price.amountCents, currency: price.currency)).font(.subheadline.weight(.bold)).foregroundStyle(Color.scoutAccent)
-                Text(tr("Dein Preis")).font(.caption2).foregroundStyle(Color.scoutMuted)
-            } else if card.hasCurrentAnalysis, let summary = card.analysis?.valuationSummary {
-                Text(trDisplay(summary.valueLabel)).font(.subheadline.weight(.bold)).foregroundStyle(Color.scoutAccent)
-                Text(trDisplay(summary.basisLabel)).font(.caption2).foregroundStyle(Color.scoutMuted).lineLimit(2)
-            } else if let value = store.unpricedBaseDisplayValue(for: card) {
-                Text(trDisplay(value.label)).font(.subheadline.weight(.bold)).foregroundStyle(Color.scoutAccent)
-                Text(trDisplay(value.basis)).font(.caption2).foregroundStyle(Color.scoutMuted).lineLimit(2)
+            if let value = store.dashboardValueCache.collectionQuote(for: card) {
+                Text(value.valueLabel).font(.subheadline.weight(.bold)).foregroundStyle(Color.scoutAccent)
+                Text(trDisplay(value.basisLabel)).font(.caption2).foregroundStyle(Color.scoutMuted).lineLimit(2)
             }
             if needsAttention { Text(trDisplay(collectorStatus(card))).font(.caption2).foregroundStyle(Color.scoutMuted).lineLimit(2) }
         }
@@ -347,72 +374,220 @@ struct OwnedTile: View {
 
 struct CollectionView: View {
     @Environment(AppStore.self) private var store
-    @ScaledMetric(relativeTo: .body) private var tileWidth = 145.0
-    var collectionID: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
+    let collectionID: String
+    let finish: BinderFinish
+    let specialIDs: Set<String>
+    @State private var requestedPocket: String?
+    @State private var highlightedPocket: String?
+    @SceneStorage private var savedPage: Int
+    @State private var filteredPage = 0
     @State private var search = ""
     @State private var filter = "Alle"
+    @State private var forward = true
+    @State private var showingInfo = false
     @State private var missing: ChecklistCard?
+    @State private var showingCopies: ChecklistCard?
     @State private var inspectingReference: CardReferenceImage?
+
+    init(collectionID: String, finish: BinderFinish, specialIDs: Set<String>, showMissing: Bool = false,
+         requestedPocket: String? = nil) {
+        _filter = State(initialValue: showMissing ? "Fehlen" : "Alle")
+        _requestedPocket = State(initialValue: requestedPocket)
+        self.collectionID = collectionID
+        self.finish = finish
+        self.specialIDs = specialIDs
+        _savedPage = SceneStorage(wrappedValue: 0, "binder.page." + collectionID)
+    }
+
+    private var locating: Bool { filter != "Alle" || !search.isEmpty }
+
     var body: some View {
         if let collection = store.library.collections.first(where: { $0.id == collectionID }) {
-            let owned = collection.ownedCount(in: store.library.cards)
-            let filtered = collection.cards.filter { card in
-                let have = !collection.owned(for: card.number, in: store.library.cards).isEmpty
-                return (filter == "Alle" || (filter == "Besitze ich" ? have : !have)) && (search.isEmpty || "\(card.number) \(card.player) \(card.team)".localizedCaseInsensitiveContains(search))
+            let inventory = collection.ownedCards(in: store.library.cards)
+            let owned = collection.ownedCount(in: inventory)
+            let filtered = collection.cards.filter { entry in
+                let have = !collection.owned(for: entry.number, in: inventory).isEmpty
+                return (filter == "Alle" || (filter == "Besitze ich" ? have : !have)) && entry.matchesBinderSearch(search)
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 26) {
-                    collectionHeader(collection, owned: owned)
-                    if let product = store.library.chaseCatalog?.products.first(where: { $0.matches(collection) }) {
-                        NavigationLink { HotListView(initialProductID: product.id) } label: {
-                            HStack {
-                                Label(tr("Wertvollste Karten"), systemImage: "chart.bar.xaxis")
-                                Spacer()
-                                Image(systemName: "arrow.up.right")
-                            }.font(.subheadline.weight(.semibold)).padding(16).background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 16))
-                        }.buttonStyle(.plain).foregroundStyle(Color.scoutAccent)
-                    }
-                    VStack(alignment: .leading, spacing: 18) {
+            let pages = max(1, (filtered.count + 3) / 4)
+            let page = min(max(0, locating ? filteredPage : savedPage), pages - 1)
+            let entries = filtered.dropFirst(page * 4).prefix(4)
+            ScrollViewReader { scroll in
+                ScrollView {
+                    VStack(spacing: 12) {
                         Picker(tr("Karten"), selection: $filter) {
                             Text(tr("Alle")).tag("Alle")
                             Text(tr("Meine · \(owned)")).tag("Besitze ich")
                             Text(tr("Fehlen · \(max(collection.cards.count - owned, 0))")).tag("Fehlen")
                         }.pickerStyle(.segmented)
-                        HStack {
-                            Text(tr("\(filtered.count) \(trDisplay(filtered.count == 1 ? "Karte" : "Karten"))")).font(.caption.weight(.medium)).foregroundStyle(Color.scoutMuted)
-                            Spacer()
-                            if !collection.checklistComplete { Text(tr("Teilcheckliste")).font(.caption).foregroundStyle(Color.scoutGold) }
+                        VStack(spacing: 5) {
+                            BinderDivider(collection: collection, finish: finish)
+                            BinderPriceTag(value: BinderValue(cards: inventory, prices: store.dashboardValueCache))
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                            if !collection.checklistComplete {
+                                Text(tr("Teilcheckliste")).font(.caption2.weight(.semibold)).foregroundStyle(.white.opacity(0.8))
+                                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8)
+                            }
+                            if entries.isEmpty {
+                                ScoutEmptyState(symbol: "magnifyingglass", title: tr("Keine Karten gefunden."))
+                            } else {
+                                ZStack(alignment: .topLeading) {
+                                    pocketPage(entries, collection: collection, inventory: inventory)
+                                        .id(page)
+                                        .transition(pageTransition)
+                                }
+                                .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { drag in
+                                        guard abs(drag.translation.width) > max(48, abs(drag.translation.height) * 1.6) else { return }
+                                        turn(to: page + (drag.translation.width < 0 ? 1 : -1), from: page, pages: pages)
+                                    })
+                            }
                         }
-                        if filtered.isEmpty {
-                            ScoutEmptyState(symbol: filter == "Fehlen" && search.isEmpty ? "checkmark.seal" : "magnifyingglass", title: filter == "Fehlen" && search.isEmpty ? "Alle erfasst." : "Keine Karten gefunden.", message: filter == "Fehlen" && !collection.checklistComplete ? "Deine aktuelle Teilcheckliste ist komplett." : nil)
-                        } else {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: tileWidth), spacing: 16, alignment: .top)], spacing: 26) {
-                                ForEach(filtered) { entry in
-                                    let ownedCards = collection.owned(for: entry.number, in: store.library.cards)
-                                    if let card = ownedCards.first {
-                                        NavigationLink { CardDetailView(cardID: card.id) } label: {
-                                            LocalCardPhoto(name: card.frontFile) { image, _ in
-                                                ChecklistTile(entry: entry, image: image, copies: ownedCards.count, market: card.hasCurrentAnalysis ? card.analysis?.valuationSummary : nil)
-                                            }
-                                        }.buttonStyle(.plain)
-                                    } else {
-                                        Button { missing = entry } label: { ChecklistTile(entry: entry, image: nil, copies: 0, reference: entry.exactReference(in: collection)) }.buttonStyle(.plain)
-                                    }
+                        .padding(7)
+                        .background(LinearGradient(colors: [Color(white: 0.16), Color(white: 0.055)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12).inset(by: 3)
+                                .strokeBorder(finish.stitch.opacity(0.65), style: StrokeStyle(lineWidth: 0.8, dash: [3, 3]))
+                                .allowsHitTesting(false)
+                        }
+                        .environment(\.colorScheme, .dark)
+                        .shadow(color: .black.opacity(0.22), radius: 4, x: 1, y: 3)
+                        if pages > 1 {
+                            HStack {
+                                pageButton("chevron.left", label: tr("Vorherige Seite"), disabled: page == 0) {
+                                    turn(to: page - 1, from: page, pages: pages)
+                                }
+                                Spacer()
+                                Text(tr("Seite \(page + 1) von \(pages)")).font(.caption.weight(.semibold)).monospacedDigit()
+                                    .accessibilityIdentifier("binder.page")
+                                Spacer()
+                                pageButton("chevron.right", label: tr("Nächste Seite"), disabled: page == pages - 1) {
+                                    turn(to: page + 1, from: page, pages: pages)
                                 }
                             }
                         }
                     }
-                    if let source = collection.sourceURL, let url = URL(string: source) {
-                        Link(destination: url) { Label(tr("Checkliste ansehen"), systemImage: "arrow.up.right.square").font(.caption).frame(minHeight: 44) }.foregroundStyle(Color.scoutMuted)
+                    .frame(maxWidth: 540).padding(.horizontal, 14).padding(.vertical, 8)
+                    .frame(maxWidth: .infinity)
+                }
+                .task(id: highlightedPocket) {
+                    if let highlightedPocket {
+                        scroll.scrollTo(highlightedPocket, anchor: .center)
                     }
-                }.padding(20)
+                }
             }
-            .background(Color.scoutCanvas).navigationTitle(collection.name).navigationBarTitleDisplayMode(.inline)
+            .background(Color.scoutCanvas).navigationBarTitleDisplayMode(.inline)
             .searchable(text: $search, prompt: tr("Spieler, Team oder Nummer"))
+            .onChange(of: search) { _, _ in
+                filteredPage = 0
+                highlightedPocket = nil
+            }
+            .onChange(of: filter) { _, _ in
+                filteredPage = 0
+                highlightedPocket = nil
+            }
+            .task(id: requestedPocket) {
+                guard let number = requestedPocket,
+                      let index = collection.cards.firstIndex(where: { $0.number == number }) else { return }
+                search = ""
+                filter = "Alle"
+                savedPage = index / 4
+                highlightedPocket = number
+                requestedPocket = nil
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showingInfo = true } label: { Image(systemName: "info.circle") }
+                        .accessibilityLabel(tr("Checkliste"))
+                }
+            }
+            .sheet(isPresented: $showingInfo) {
+                NavigationStack {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            collectionHeader(collection, owned: owned)
+                            if let product = store.library.chaseCatalog?.products.first(where: { $0.matches(collection) }) {
+                                NavigationLink { HotListView(initialProductID: product.id) } label: {
+                                    Label(tr("Wertvollste Karten"), systemImage: "chart.bar.xaxis")
+                                }
+                            }
+                            if let source = collection.sourceURL, let url = URL(string: source) {
+                                Link(destination: url) { Label(tr("Checkliste ansehen"), systemImage: "arrow.up.right.square") }
+                            }
+                        }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+                    }.navigationTitle(collection.name).navigationBarTitleDisplayMode(.inline)
+                        .toolbar { ToolbarItem(placement: .confirmationAction) { Button(tr("Fertig")) { showingInfo = false } } }
+                }.presentationDetents([.medium, .large])
+            }
             .sheet(item: $missing) { entry in missingSheet(entry, collection: collection) }
-        } else {
-            ScoutEmptyState(symbol: "books.vertical", title: tr("Binder nicht verfügbar.")).background(Color.scoutCanvas)
+            .navigationDestination(item: $showingCopies) { entry in
+                BinderPocketCopies(collection: collection, entry: entry)
+            }
+        } else { ScoutEmptyState(symbol: "books.vertical", title: tr("Binder nicht verfügbar.")) }
+    }
+
+    private func pocketPage(_ entries: ArraySlice<ChecklistCard>, collection: CardCollection, inventory: [OwnedCard]) -> some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .top), count: typeSize.isAccessibilitySize ? 1 : 2), spacing: 6) {
+            ForEach(entries) { entry in
+                let copies = collection.owned(for: entry.number, in: inventory)
+                Group {
+                    if let card = copies.first(where: { specialIDs.contains($0.id) }) ?? copies.first {
+                        if copies.count > 1 {
+                            Button { showingCopies = entry } label: { ownedPocket(entry, card: card, copies: copies.count) }
+                        } else {
+                            NavigationLink { CardDetailView(cardID: card.id) } label: { ownedPocket(entry, card: card, copies: 1) }
+                        }
+                    } else {
+                        Button { missing = entry } label: {
+                            ChecklistTile(entry: entry, image: nil, copies: 0, stitch: finish.stitch, reference: entry.exactReference(in: collection))
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .overlay {
+                    if highlightedPocket == entry.number {
+                        RoundedRectangle(cornerRadius: 5)
+                            .strokeBorder(Color.scoutAccent, lineWidth: 2)
+                            .allowsHitTesting(false).accessibilityHidden(true)
+                    }
+                }
+                .id(entry.number)
+                .accessibilityIdentifier("binder.pocket." + entry.number)
+                .accessibilityAddTraits(highlightedPocket == entry.number ? .isSelected : [])
+            }
         }
+        .padding(5)
+        .background(Color(white: 0.105), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func ownedPocket(_ entry: ChecklistCard, card: OwnedCard, copies: Int) -> some View {
+        LocalCardPhoto(name: card.frontFile) { image, _ in
+            ChecklistTile(entry: entry, image: image, copies: copies, stitch: finish.stitch,
+                          isSpecial: specialIDs.contains(card.id), value: store.dashboardValueCache.collectionQuote(for: card))
+        }
+    }
+
+    private var pageTransition: AnyTransition {
+        guard !reduceMotion else { return .identity }
+        let folded = AnyTransition.modifier(active: FoldedPocketSheet(angle: -86), identity: FoldedPocketSheet(angle: 0))
+        return .asymmetric(insertion: forward ? .opacity : folded, removal: forward ? folded : .opacity)
+    }
+
+    private func turn(to target: Int, from current: Int, pages: Int) {
+        guard (0..<pages).contains(target), target != current else { return }
+        forward = target > current
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.32)) {
+            highlightedPocket = nil
+            if locating { filteredPage = target } else { savedPage = target }
+        }
+    }
+
+    private func pageButton(_ icon: String, label: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: icon).frame(width: 44, height: 44) }
+            .buttonStyle(.plain).disabled(disabled).opacity(disabled ? 0.3 : 1)
+            .accessibilityLabel(label)
     }
 
     private func collectionHeader(_ collection: CardCollection, owned: Int) -> some View {
@@ -472,17 +647,69 @@ struct CollectionView: View {
     }
 }
 
+private struct BinderPocketCopies: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let collection: CardCollection
+    let entry: ChecklistCard
+
+    var body: some View {
+        let cards = collection.owned(for: entry.number, in: store.library.collectedCards).sorted {
+            ($0.createdAt, $0.id) > ($1.createdAt, $1.id)
+        }
+        List(Array(cards.enumerated()), id: \.element.id) { index, card in
+            HStack {
+                NavigationLink { CardDetailView(cardID: card.id) } label: {
+                    HStack(spacing: 12) {
+                        OwnedPhoto(name: card.frontFile, number: entry.number).frame(width: 48, height: 66)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(tr("Exemplar \(index + 1)")).font(.headline)
+                            if let scanned = ISO8601DateFormatter().date(from: card.createdAt) {
+                                Text(verbatim: scanned.scoutFormatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption).foregroundStyle(Color.scoutMuted)
+                            }
+                        }
+                    }
+                }
+                CardRemovalButton(card: card).buttonStyle(.borderless)
+            }
+        }
+        .navigationTitle(entry.player)
+        .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: cards.isEmpty) { _, empty in if empty { dismiss() } }
+    }
+}
+
 struct ChecklistTile: View {
+    @Environment(\.horizontalSizeClass) private var widthClass
+    @ScaledMetric(relativeTo: .body) private var photoHeight: CGFloat = 152
     let entry: ChecklistCard
     let image: UIImage?
     let copies: Int
-    var market: RawMarketSummary? = nil
+    let stitch: Color
+    var isSpecial = false
+    var value: BinderQuote? = nil
     var reference: CardReferenceImage? = nil
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             Group {
-                if image == nil, let reference { ReferenceImageView(url: reference.frontURL).aspectRatio(5.0 / 7.0, contentMode: .fit) }
-                else { PhotoCard(image: image, number: entry.number, owned: copies > 0) }
+                if let reference, copies == 0 {
+                    ReferenceImageView(url: reference.frontURL).aspectRatio(5.0 / 7.0, contentMode: .fit)
+                } else if copies == 0 {
+                    EmptyBinderPocket(number: entry.number, stitch: stitch)
+                } else {
+                    PhotoCard(image: image, number: entry.number, owned: true)
+                }
+            }
+            .aspectRatio(5.0 / 7.0, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .frame(height: widthClass == .regular ? 220 : min(photoHeight, 200))
+            .overlay(alignment: .topLeading) {
+                if isSpecial {
+                    Image(systemName: "sparkles").font(.caption.bold()).foregroundStyle(.yellow)
+                        .padding(5).background(Color.black.opacity(0.86), in: RoundedRectangle(cornerRadius: 5))
+                        .padding(4).accessibilityHidden(true)
+                }
             }
             .overlay(alignment: .topTrailing) {
                 if copies > 0 {
@@ -492,16 +719,20 @@ struct ChecklistTile: View {
                     }.foregroundStyle(Color.white).frame(minWidth: 27, minHeight: 27).background(Color.scoutButtonFill, in: Capsule()).padding(8)
                 }
             }
-            Text(entry.player).font(.subheadline.weight(.semibold)).foregroundStyle(copies > 0 ? Color.scoutInk : Color.scoutMuted).lineLimit(2)
+            Text(entry.player).font(.subheadline.weight(.semibold)).foregroundStyle(copies > 0 ? Color.white : Color(white: 0.78)).lineLimit(2)
             Text(tr("#\(entry.number)\(entry.rookie ? " · RC" : "")\(trDisplay(copies == 0 ? " · Fehlt" : ""))")).font(.caption).foregroundStyle(Color.scoutMuted)
-            if let market {
-                Text(trDisplay(market.valueLabel)).font(.subheadline.weight(.bold)).foregroundStyle(Color.scoutAccent)
-                Text(trDisplay(market.basisLabel)).font(.caption2).foregroundStyle(Color.scoutMuted).lineLimit(2)
+            if let value {
+                Text(value.valueLabel).font(.subheadline.weight(.bold)).foregroundStyle(Color.scoutAccent)
+                Text(trDisplay(value.basisLabel)).font(.caption2).foregroundStyle(Color.scoutMuted).lineLimit(2)
             }
-        }.frame(maxWidth: .infinity, alignment: .leading)
+        }.padding(6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(LinearGradient(colors: [Color(white: 0.21), Color(white: 0.115), Color(white: 0.15)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay { RoundedRectangle(cornerRadius: 5).strokeBorder(LinearGradient(colors: [.white.opacity(0.58), .white.opacity(0.09), .white.opacity(0.31)], startPoint: .topLeading, endPoint: .bottomTrailing)) }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(tr("\(entry.player), Nummer \(entry.number), \(copies > 0 ? "\(copies) vorhanden" : "fehlt")\(market.map { ", \($0.valueLabel), \($0.basisLabel)" } ?? "")"))
-            .accessibilityHint(trDisplay(copies > 0 ? "Kartendetails öffnen" : "Karte im Lookout vormerken"))
+            .accessibilityLabel([entry.player, "#" + entry.number, copies > 0 ? tr("\(copies) vorhanden") : tr("Fehlt"), isSpecial ? tr("Besondere Karte") : nil, value.map { $0.valueLabel }, value.map { trDisplay($0.basisLabel) }].compactMap { $0 }.joined(separator: ", "))
+            .accessibilityHint(trDisplay(copies > 1 ? "Exemplare ansehen" : copies == 1 ? "Kartendetails öffnen" : "Karte im Lookout vormerken"))
     }
 }
 
@@ -516,9 +747,9 @@ struct CardDetailView: View {
 
 private struct CollectedCardDetailView: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dismiss) private var dismiss
     let cardID: String
-    @State private var side = "Vorne"
+    @State private var back = false
     @State private var correcting = false
     @State private var reviewingIdentity = false
     @State private var retaking = false
@@ -527,116 +758,93 @@ private struct CollectedCardDetailView: View {
     @State private var editingPrice = false
     var body: some View {
         if let card = store.library.cards.first(where: { $0.id == cardID }) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 26) {
-                        photoStage(card)
-                        Button { store.toggleCollectible(card.id) } label: {
-                            Label(trDisplay(card.isCollectible == true ? "In deinen Collectibles" : "Zu Collectibles hinzufügen"), systemImage: card.isCollectible == true ? "trophy.fill" : "trophy")
-                                .frame(maxWidth: .infinity)
-                        }.buttonStyle(ScoutSecondaryButtonStyle())
-                        if card.personalPrice?.isValid != true, let value = store.unpricedBaseDisplayValue(for: card) {
-                            LabeledContent(trDisplay(value.basis)) { Text(trDisplay(value.label)).bold() }
-                        }
-                        Button { editingPrice = true } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(tr("Dein Preis")).font(.caption).foregroundStyle(Color.scoutMuted)
-                                    if let price = card.personalPrice, price.isValid {
-                                        Text(CollectionCardValue.money(price.amountCents, currency: price.currency)).font(.title2.bold())
-                                    } else { Text(tr("Preis hinzufügen")).font(.headline) }
-                                }
-                                Spacer()
-                                Image(systemName: "pencil")
-                            }.frame(maxWidth: .infinity)
-                        }.buttonStyle(ScoutSecondaryButtonStyle())
-                        if card.hasDisplayableAnalysis, let analysis = card.analysis {
-                            if !card.hasCurrentAnalysis { statusPanel(card, previous: true) }
-                            if analysis.identityConfirmed != true {
-                                Button { reviewingIdentity = true } label: {
-                                    Label(tr("Zuordnung prüfen"), systemImage: "rectangle.and.pencil.and.ellipsis").frame(maxWidth: .infinity)
-                                }.buttonStyle(ScoutSecondaryButtonStyle())
-                            }
-                            if let collection = store.library.collections.first(where: { $0.id == analysis.collectionID }) {
-                                if let entry = collection.cards.first(where: { $0.number == analysis.cardNumber && $0.player == analysis.player }), let reference = entry.exactReference(in: collection) {
-                                    NavigationLink { ReferenceComparisonView(reference: reference, cardID: card.id) } label: {
-                                        Label(tr("Mit Referenzfoto vergleichen"), systemImage: "photo.on.rectangle.angled").frame(maxWidth: .infinity)
-                                    }.buttonStyle(ScoutSecondaryButtonStyle())
-                                } else if let reference = collection.validReferenceExample {
-                                    NavigationLink { ReferenceComparisonView(reference: reference, cardID: card.id, variantExample: true) } label: {
-                                        Label(tr("Variantenbeispiel vergleichen"), systemImage: "photo.on.rectangle.angled").frame(maxWidth: .infinity)
-                                    }.buttonStyle(ScoutSecondaryButtonStyle())
-                                }
-                            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    CardDisplayCase(card: card, back: $back, zoom: { photoExpanded = true }, retake: { retaking = true })
+                    CardValueStrip(card: card, pricingPaused: !store.connected || card.state == "failed", edit: { editingPrice = true })
+                    if card.hasDisplayableAnalysis, let analysis = card.analysis {
+                        if !card.hasCurrentAnalysis { statusPanel(card, previous: true) }
+                        FinishFollowUp(card: card)
+                        if card.automaticScan != true && card.analysis?.finishPolicy == nil {
                             CardVariantPicker(card: card)
-                            AnalysisCardsView(analysis: analysis, provisional: card.hasProvisionalAnalysis == true, pricingPaused: card.state == "failed" || !store.connected, assessmentCleared: card.manualAssignment == true && analysis.insights == nil) { section in
-                                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) { proxy.scrollTo(section, anchor: .top) }
-                            }
-                            VStack(spacing: 10) {
-                                Button { store.reanalyze(card.id) } label: {
-                                    Label(tr("Neu bewerten"), systemImage: "arrow.clockwise").frame(maxWidth: .infinity)
-                                }.buttonStyle(ScoutSecondaryButtonStyle()).disabled(card.isAwaitingAnalysis)
-                                Button(tr("Zuordnung korrigieren")) { correcting = true }.font(.subheadline).foregroundStyle(Color.scoutMuted).frame(minHeight: 44)
-                            }
-                        } else { statusPanel(card, previous: false) }
-                        VStack(alignment: .leading, spacing: 8) {
-                            if let location = card.storageLocation, !location.isEmpty { Label(trDisplay(location), systemImage: "archivebox").font(.subheadline) }
-                            if let notes = card.notes, !notes.isEmpty { Text(notes).font(.subheadline).foregroundStyle(Color.scoutMuted) }
-                            Button(tr("Aufbewahrung & Notizen")) { editingMetadata = true }.font(.subheadline).frame(minHeight: 44)
+                        } else if !(card.analysis?.cardSightVariants ?? []).isEmpty {
+                            DisclosureGroup(tr("Edit finish")) { CardVariantPicker(card: card) }
                         }
-                    }.padding(20).padding(.bottom, 16)
-                }
-                .background(Color.scoutCanvas).navigationTitle(tr("Deine Karte")).navigationBarTitleDisplayMode(.inline)
+                        ScoutPanel(padding: 0) {
+                            VStack(alignment: .leading, spacing: 0) {
+                                if analysis.identityConfirmed != true && card.automaticScan != true && analysis.finishPolicy == nil {
+                                    Button { reviewingIdentity = true } label: { action("Zuordnung prüfen", "rectangle.and.pencil.and.ellipsis") }
+                                    Divider()
+                                }
+                                if let set = store.library.collections.first(where: { $0.id == analysis.collectionID }) {
+                                    if let exact = set.cards.first(where: { $0.number == analysis.cardNumber && $0.player == analysis.player })?.exactReference(in: set) {
+                                        NavigationLink { ReferenceComparisonView(reference: exact, cardID: card.id) } label: { action("Mit Referenzfoto vergleichen", "photo.on.rectangle.angled") }
+                                        Divider()
+                                    } else if let example = set.validReferenceExample {
+                                        NavigationLink { ReferenceComparisonView(reference: example, cardID: card.id, variantExample: true) } label: { action("Variantenbeispiel vergleichen", "photo.on.rectangle.angled") }
+                                        Divider()
+                                    }
+                                }
+                                collectible(card)
+                            }
+                        }.buttonStyle(.plain)
+                        AnalysisCardsView(analysis: analysis, provisional: card.hasProvisionalAnalysis == true, assessmentCleared: card.manualAssignment == true && analysis.insights == nil)
+                    } else {
+                        statusPanel(card, previous: false)
+                        ScoutPanel(padding: 0) { collectible(card) }.buttonStyle(.plain)
+                    }
+                    ScoutPanel(padding: 0) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Button { editingMetadata = true } label: { action("Aufbewahrung & Notizen", "archivebox") }
+                            if let location = card.storageLocation, !location.isEmpty { Text(verbatim: location).font(.subheadline).padding([.horizontal, .bottom], 14) }
+                            if let notes = card.notes, !notes.isEmpty { Text(verbatim: notes).font(.subheadline).foregroundStyle(Color.scoutMuted).padding([.horizontal, .bottom], 14) }
+                            if card.hasDisplayableAnalysis {
+                                Divider()
+                                Button { correcting = true } label: { action("Zuordnung korrigieren", "pencil") }
+                                Divider()
+                                Button { store.reanalyze(card.id) } label: { action("Neu bewerten", "arrow.clockwise", disclosure: false) }.disabled(card.isAwaitingAnalysis)
+                            }
+                        }
+                    }.buttonStyle(.plain)
+                }.frame(maxWidth: 560).padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 24)
+                    .frame(maxWidth: .infinity)
+            }.background(Color.scoutCanvas).navigationTitle(tr("Deine Karte")).navigationBarTitleDisplayMode(.inline)
+                .toolbar(.hidden, for: .tabBar)
                 .task(id: card.jobID) { await store.loadCardPrices(card.id) }
                 .sheet(isPresented: $correcting) { CorrectCardView(cardID: card.id) }
                 .sheet(isPresented: $reviewingIdentity) { IdentityReviewView(cardID: card.id) }
                 .sheet(isPresented: $retaking) { AddCardView(cardID: card.id).tint(.scoutAccent) }
                 .sheet(isPresented: $editingPrice) { PersonalPriceEditorView(cardID: card.id, price: card.personalPrice) }
                 .sheet(isPresented: $editingMetadata) { CardMetadataView(cardID: card.id) }
-                .fullScreenCover(isPresented: $photoExpanded) { CardPhotoViewer(cardID: card.id, initialBack: side == "Hinten") }
+                .fullScreenCover(isPresented: $photoExpanded) { CardPhotoViewer(cardID: card.id, initialBack: back, useCutout: true) }
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button { store.toggleFavorite(card.id) } label: { Image(systemName: card.isFavorite == true ? "star.fill" : "star").frame(width: 44, height: 44) }
                             .accessibilityLabel(trDisplay(card.isFavorite == true ? "Favorit entfernen" : "Als Favorit merken"))
                     }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        CardRemovalButton(card: card) { dismiss() }
+                    }
                 }
-            }
         } else {
             ScoutEmptyState(symbol: "rectangle.portrait.slash", title: tr("Karte nicht verfügbar.")).background(Color.scoutCanvas)
         }
     }
 
-    private func photoStage(_ card: OwnedCard) -> some View {
-        VStack(spacing: 18) {
-            Button { photoExpanded = true } label: {
-                OwnedPhoto(name: side == "Vorne" ? card.frontFile : card.backFile, maxPixel: 2600, number: "")
-                    .frame(height: 350).frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background {
-                        RoundedRectangle(cornerRadius: 26)
-                            .fill(Color.scoutSurface)
-                    }
-                    .overlay(alignment: .bottomTrailing) {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption.weight(.semibold)).padding(12).foregroundStyle(Color.scoutMuted)
-                    }
-            }.buttonStyle(.plain).accessibilityLabel(tr("Karte vergrößern. \(trDisplay(side == "Vorne" ? "Vorderseite" : "Rückseite")) von \(card.title)"))
-            HStack(spacing: 14) {
-                if card.backFile != nil {
-                    Picker(tr("Kartenseite"), selection: $side) { Text(tr("Vorne")).tag("Vorne"); Text(tr("Hinten")).tag("Hinten") }.pickerStyle(.segmented)
-                } else { Text(tr("Vorderseite")).font(.caption).foregroundStyle(Color.scoutMuted); Spacer() }
-                Button { retaking = true } label: { Image(systemName: "camera.rotate").font(.title3).frame(width: 44, height: 44).background(Color.scoutSurface, in: RoundedRectangle(cornerRadius: 12)) }
-                    .accessibilityLabel(tr("Foto neu aufnehmen"))
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                Text(cardTitle(card)).font(.largeTitle.weight(.bold)).fixedSize(horizontal: false, vertical: true)
-                if let team = card.analysis?.team { Text(trDisplay(team)).font(.subheadline).foregroundStyle(Color.scoutMuted) }
-                if let a = card.analysis {
-                    Text(trDisplay([a.year.map(String.init), a.setName, a.cardNumber.map { "#" + $0 }, a.parallel ?? a.subset]
-                        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")))
-                        .font(.caption).foregroundStyle(Color.scoutMuted).fixedSize(horizontal: false, vertical: true)
-                }
-            }.frame(maxWidth: .infinity, alignment: .leading)
-        }
+    private func collectible(_ card: OwnedCard) -> some View {
+        Button { store.toggleCollectible(card.id) } label: {
+            action(card.isCollectible == true ? "In deinen Collectibles" : "Zu Collectibles hinzufügen",
+                   card.isCollectible == true ? "trophy.fill" : "trophy", disclosure: false)
+        }.accessibilityAddTraits(card.isCollectible == true ? .isSelected : [])
+    }
+
+    private func action(_ title: String, _ symbol: String, disclosure: Bool = true) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol).foregroundStyle(Color.scoutAccent).frame(width: 24)
+            Text(trDisplay(title)).font(.subheadline.weight(.semibold)).foregroundStyle(Color.scoutInk).multilineTextAlignment(.leading)
+            Spacer(minLength: 4)
+            if disclosure { Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(Color.scoutMuted) }
+        }.padding(.horizontal, 14).padding(.vertical, 6).frame(minHeight: 48).contentShape(Rectangle())
     }
 
     private func statusPanel(_ card: OwnedCard, previous: Bool) -> some View {
@@ -650,7 +858,7 @@ private struct CollectedCardDetailView: View {
                 if previous && card.hasProvisionalAnalysis != true { Text(tr("Bisherige Bewertung")).font(.caption).foregroundStyle(Color.scoutMuted) }
                 if card.state == "queued" && !store.connected {
                     Text(tr("Gespeichert. Die Analyse startet, sobald dein Mac oder Server verbunden ist.")).font(.subheadline).foregroundStyle(Color.scoutMuted)
-                    Button(tr("Verbindung öffnen")) { store.showSettings = true }.font(.subheadline.weight(.semibold)).frame(minHeight: 44)
+                    Button(tr("Verbindung öffnen")) { store.openConnectionSettings() }.font(.subheadline.weight(.semibold)).frame(minHeight: 44)
                 }
                 if let error = card.error { Text(trDisplay(error)).font(.subheadline).foregroundStyle(Color.scoutMuted) }
                 if card.state == "unidentified" {

@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from identity_decisions import IdentityResolver, serials, ocr_agrees, ocr_fields
 from card_lookup import CardLookup
@@ -342,7 +342,7 @@ class IdentityResolverTests(unittest.TestCase):
                                            dict(cards=[c], total_count=1), dict(c, parallelCount=0, parallels=[])]
         self.assertEqual(self.resolver.resolve({'noDetection': True}, self.job, self.client), {})
         self.assertFalse(self.calls)
-        self.choices = [CARD]
+        self.choices = [CARD, 'base']
         result = self.resolver.resolve({'noDetection': True}, self.job, self.client)
         self.assertEqual(self.client.request.call_args_list[1].args[2]['name'], 'mason heintschel')
         self.assertEqual(result['card']['id'], CARD)
@@ -393,4 +393,37 @@ class IdentityResolverTests(unittest.TestCase):
         self.choices = ['unclear']
         self.assertEqual(self.resolve(c), {})
         self.assertEqual(self.client.request.call_args.args[2]['number'], '148')
-        self.assertEqual([p['questions'][0]['name'] for p in self.calls], ['card'])
+        self.assertEqual(self.calls, [])
+
+    def test_flagship_unclear_identity_triggers_one_focused_back_read(self):
+        import edition_review
+        release = edition_review.FLAGSHIP
+        c = dict(card(), releaseId=release, year="2026", releaseYear="2026", manufacturer="Topps",
+                 releaseName="Topps Flagship Football", setName="1991 Topps", number="91TF-35")
+        (self.job / "back.jpg").write_bytes(b"fixture back")
+        (self.root / "config.json").write_text(json.dumps(dict(apiEnabled=True, apiModel="fixture")))
+        self.hints("Front: TYRONE TRACY JR.\nBack: Produced by The Topps Company")
+        self.choices = ["unclear", "base"]
+        self.client.request.side_effect = [dict(cards=[c], total_count=1), dict(c, parallels=[], parallelCount=0)]
+        fields = dict(player=c["name"], number=c["number"], release=c["releaseName"])
+        with patch("api_client.run_response", return_value=fields) as back_read:
+            result = self.resolve(c, "Medium")
+        back_read.assert_called_once()
+        self.assertEqual(result["card"]["id"], CARD)
+        self.assertEqual(result["finishState"], "verified")
+        self.assertEqual(self.client.request.call_args_list[0].args[2]["number"], "91TF-35")
+        self.assertEqual([p["questions"][0]["name"] for p in self.calls], ["card", "catalog_finish"])
+
+    def test_other_release_retries_with_all_eligible_options_after_unclear_suggestion(self):
+        (self.job / "back.jpg").write_bytes(b"fixture back")
+        self.hints("Front: Tyrone Tracy Jr.\nBack: Card number 147")
+        self.client.request.return_value = dict(card(), parallelCount=2, parallels=[
+            dict(id=OTHER, name="Gold"), dict(id=PARALLEL, name="Rainbow")])
+        c = dict(card(), parallelSuggestions=[dict(id=PARALLEL, confidence="Low")])
+        self.choices = ["unclear", OTHER]
+        result = self.resolve(c)
+        self.assertEqual(result["card"]["parallelSuggestions"][0]["id"], OTHER)
+        questions = [p["questions"][0] for p in self.calls]
+        self.assertEqual([q["name"] for q in questions], ["parallel", "catalog_retry"])
+        self.assertNotIn(OTHER, {c["value"] for c in questions[0]["choices"]})
+        self.assertIn(OTHER, {c["value"] for c in questions[1]["choices"]})

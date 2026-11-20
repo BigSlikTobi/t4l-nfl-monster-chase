@@ -16,6 +16,71 @@ final class BatchReanalysisTests: XCTestCase {
         a.identityConfirmed = confirmed
         return OwnedCard(state: "analyzed", frontFile: "front.jpg", backFile: "back.jpg", analysis: a)
     }
+    func testAutomaticRecheckFilesNewEditionAndPreservesOriginalChoiceAndPhoto() throws {
+        var library = Library()
+        var before = card(confirmed: true)
+        before.analysis?.collectionID = "silver"
+        before.manualAssignment = true
+        before.isScanDraft = true
+        library.cards = [before, card()]
+        let operation = UUID().uuidString
+        var run = try disk.recheckPhotos(ids: [before.id], operation: operation, in: library)
+        let jobID = run.cards[0].jobID
+        XCTAssertEqual(try disk.recheckPhotos(ids: [before.id], operation: operation, in: run).cards, run.cards)
+        XCTAssertEqual(library.cards[1], run.cards[1])
+        var match = try XCTUnwrap(before.analysis)
+        match.parallel = "Hot Pink X-Fractor"
+        match.collectionID = "pink"
+        match.finishState = "verified"
+        for status in ["identified", "analyzed"] {
+            XCTAssertTrue(try run.applyJobResult(cardID: before.id, jobID: jobID, status: status, analysis: match, collection: nil, error: nil))
+        }
+        XCTAssertEqual(run.cards[0].analysis?.parallel, match.parallel)
+        XCTAssertEqual(run.cards[0].previousPhotoAssignment, before.analysis)
+        XCTAssertEqual(run.cards[0].isScanDraft, false)
+        XCTAssertEqual(run.cards[0].frontFile, before.frontFile)
+        XCTAssertFalse(try run.applyJobResult(cardID: before.id, jobID: before.jobID, status: "analyzed", analysis: before.analysis, collection: nil, error: nil))
+    }
+
+    func testTiltIsOneExtraFileAndRequiresAnOpticalDecision() throws {
+        var library = Library()
+        var original = card()
+        original.automaticScan = true
+        original.analysis?.finishState = "pending"
+        XCTAssertNil(ReviewIssue.identity(original))
+        library.cards = [original]
+        XCTAssertThrowsError(try disk.addTilt(Data([9]), cardID: original.id, jobID: original.jobID, in: library))
+        library.cards[0].analysis?.finishState = "tilt"
+        var run = try disk.addTilt(Data([9]), cardID: original.id, jobID: original.jobID, in: library)
+        let newJob = run.cards[0].jobID
+        XCTAssertEqual(run.cards[0].backFile, original.backFile)
+        XCTAssertEqual(try Data(contentsOf: disk.photoURL(original.frontFile)), Data([1, 2, 3]))
+        XCTAssertTrue(try run.applyJobResult(cardID: original.id, jobID: newJob, status: "analyzed", analysis: library.cards[0].analysis, collection: nil, error: nil))
+        XCTAssertFalse(run.cards[0].canAddTilt)
+        XCTAssertThrowsError(try disk.addTilt(Data([8]), cardID: original.id, jobID: newJob, in: run))
+    }
+
+    func testSavedReceiptsApplyOfflineOnlyToMatchingUploadedRevisions() throws {
+        var library = Library()
+        library.cards = [card(), card()]
+        let operation = UUID().uuidString
+        library = try disk.recheckPhotos(ids: Set(library.cards.map(\.id)), operation: operation, in: library)
+        for i in library.cards.indices { library.cards[i].uploadedJobID = library.cards[i].jobID }
+        try disk.save(library)
+        let current = library.cards[0]
+        let other = library.cards[1]
+        let receipt = SavedScanReceipt(cardID: current.id, analysis: try XCTUnwrap(current.analysis),
+                                       collection: nil, matches: nil, matchNotice: nil)
+        let bundle = [current.jobID: receipt, other.jobID: receipt]
+        let url = root.appendingPathComponent("recheck-receipts-" + operation + ".json")
+        try JSONEncoder().encode(bundle).write(to: url, options: .atomic)
+        let saved = try disk.load()
+        XCTAssertTrue(saved.cards[0].hasCurrentAnalysis)
+        XCTAssertEqual(saved.cards[1], other)
+        XCTAssertEqual(try disk.load().cards, saved.cards)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
     func testBatchKeepsCollectionAndPhotosAndDoesNotRepeat() throws {
         var library = Library(); library.cards = [card(), card(), card(confirmed: true)]
         try disk.save(library)

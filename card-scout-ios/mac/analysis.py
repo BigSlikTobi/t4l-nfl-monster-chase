@@ -151,6 +151,44 @@ def canonical_bowman_subset(a):
     if a.get("subset") in aliases and re.fullmatch(r"BPP-(?:[1-9]\d{0,2}|ALT1)", a.get("cardNumber") or ""):
         a["subset"] = "Paper Prospects"
 
+
+# Topps' 2026 Bowman Football checklist mixes NFL and collegiate families.
+# https://www.topps.com/pages/bowman-football
+_BOWMAN_BASE_NUMBERS = r"(?:[1-9][0-9]?|1[0-9]{2}|200)"
+BOWMAN_LICENSE_FAMILIES = {
+    "Base": ("nfl_and_nflpa", _BOWMAN_BASE_NUMBERS),
+    "Chrome Base": ("nfl_and_nflpa", "BCV-" + _BOWMAN_BASE_NUMBERS),
+    "Paper Prospects": ("college", rf"BPP-(?:{_BOWMAN_BASE_NUMBERS}|ALT1)"),
+    "Chrome Prospects": ("college", rf"(?:BCP-{_BOWMAN_BASE_NUMBERS}|ALT-1)"),
+    "Gen Next": ("college", r"GN-(?:[1-9]|1[0-9]|2[0-5])"),
+    "Bowman Verified": ("college", r"BV-(?:[1-9]|1[0-9]|2[0-5])"),
+    "Rockstar Rookies": ("nfl_and_nflpa", r"RR-(?:[1-9]|1[0-9]|20)"),
+    "ROY Favorites": ("nfl_and_nflpa", r"ROY-(?:[1-9]|1[0-9]|20)"),
+}
+
+
+def bowman_license_scope(year, brand, release, subset, number):
+    if (year, brand, release) != (2026, "Topps", "Bowman"):
+        return None
+    family = {"Base Set": "Base", "Chrome": "Chrome Base", "Prospects": "Paper Prospects"}.get(subset, subset)
+    scope, pattern = BOWMAN_LICENSE_FAMILIES.get(family, (None, None))
+    return scope if pattern and re.fullmatch(pattern, number or "") else None
+
+
+def repair_confirmed_bowman_license(analysis):
+    if (analysis.get("assessmentSource") != "cardsight" or analysis.get("identityConfirmed") is not True
+            or analysis.get("confidence") != "high" or analysis.get("licenseScope") != "unknown"
+            or not analysis.get("cardSightIdentity")):
+        return False
+    scope = bowman_license_scope(*(analysis.get(field) for field in ("year", "brand", "setName", "subset", "cardNumber")))
+    if not scope:
+        return False
+    analysis["licenseScope"] = scope
+    if not analysis.get("uncertainties"):
+        analysis["needsReview"] = False
+    return True
+
+
 def validate_schema(value, schema, path="result"):
     typ = schema["type"]
     types = typ if isinstance(typ, list) else [typ]
@@ -340,16 +378,14 @@ def requires_identity_fallback(result):
 def identity_conflict(a):
     """The same reviewed Optic constraints used by the phone's review queue."""
     if (a.get("year"), a.get("brand"), a.get("setName")) == (2026, "Topps", "Bowman"):
-        families = {"Base": r"[1-9]\d{0,2}", "Chrome Base": r"BCV-[1-9]\d{0,2}",
-                    "Paper Prospects": r"BPP-(?:[1-9]\d{0,2}|ALT1)",
-                    "Chrome Prospects": r"(?:BCP-[1-9]\d{0,2}|ALT-1)"}
         family = a.get("subset")
-        if family in families:
-            if not re.fullmatch(families[family], a.get("cardNumber") or ""):
+        if family in BOWMAN_LICENSE_FAMILIES:
+            expected, pattern = BOWMAN_LICENSE_FAMILIES[family]
+            if not re.fullmatch(pattern, a.get("cardNumber") or ""):
                 return "Die Kartennummer passt nicht zur Bowman-Teilcheckliste. Papier, Chrome und College getrennt prüfen."
-            college = "Prospects" in family
             scope = a.get("licenseScope")
-            if (college and scope in ("nfl", "nflpa", "nfl_and_nflpa")) or (not college and scope == "college"):
+            if (expected == "college" and scope in ("nfl", "nflpa", "nfl_and_nflpa")) or (
+                    expected == "nfl_and_nflpa" and scope == "college"):
                 return "Die Lizenzzuordnung widerspricht der Bowman-Teilcheckliste: NFL und College getrennt prüfen."
     if (a.get("year"), a.get("brand"), a.get("setName"), a.get("subset")) != (2025, "Panini", "Donruss Optic", "Base"):
         return None
